@@ -13,7 +13,7 @@
 
 set -eu
 
-REPO_URL="https://github.com/CHANGE_ME/rspace-interface"   # TODO: set when the repo exists
+REPO_URL="https://github.com/BelaErlinghagen/rspace-interface"  
 UV_BIN_DIR="$HOME/.local/bin"
 
 echo "============================================="
