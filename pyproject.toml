@@ -1,0 +1,19 @@
+[project]
+name = "rspace-interface"
+version = "0.1.0"
+description = "Desktop interface for the RSpace electronic lab notebook"
+requires-python = ">=3.12"
+dependencies = [
+    "pyqt6>=6.4",
+    "requests>=2.31.0",
+]
+
+[tool.uv]
+# This is a script-based app, not an installable package: uv should only manage
+# the dependency environment and must not try to build the project itself.
+package = false
+# Always use a uv-managed, standalone Python (built against a modern OpenSSL),
+# never the machine's system Python. The system Python on some platforms (e.g.
+# Apple's, built against LibreSSL) cannot complete TLS handshakes with RSpace,
+# and pinning a managed interpreter also keeps behaviour identical across OSes.
+python-preference = "only-managed"
