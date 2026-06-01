@@ -6,7 +6,7 @@ Coding tools to interface with RSpace at the IEECR.
 
 - [rspace.py](https://github.com/BelaErlinghagen/IEECRSpace/blob/main/rspace.py) contains tools to interface with the RSpace API and to rename/restructure files
 - [rspace_interface.py](https://github.com/BelaErlinghagen/IEECRSpace/blob/main/rspace_interface.py) wraps the code in a graphical user interface
-- [create_package](https://github.com/BelaErlinghagen/IEECRSpace/blob/main/Installation/create_package.py) creates a zip compressed folder out of the codebase.
+- [create_package.py](https://github.com/BelaErlinghagen/IEECRSpace/blob/main/Installation/create_package.py) creates a zip compressed folder out of the codebase.
 
 ## Installation
 
