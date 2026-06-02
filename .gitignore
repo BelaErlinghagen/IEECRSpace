@@ -6,6 +6,9 @@
 config/
 APIkey.txt
 
+# In-progress entry drafts (local working data)
+Autosaved/
+
 # Build artifacts
 Installation/*.zip
 __pycache__/

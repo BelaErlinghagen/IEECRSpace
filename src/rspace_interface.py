@@ -2,6 +2,7 @@ import os
 import platform
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Fix "Fontconfig error: Cannot load default config file" in pixi/conda environments.
@@ -144,6 +145,27 @@ class FolderTree(QWidget):
         if item is None:
             return None
         return item.data(0, _ROLE_ID)
+
+    def select_by_id(self, folder_id):
+        """Select the tree item whose folder id equals `folder_id` (no-op if absent)."""
+        if folder_id is None:
+            return
+
+        def find(item):
+            if item.data(0, _ROLE_ID) == folder_id:
+                return item
+            for i in range(item.childCount()):
+                hit = find(item.child(i))
+                if hit:
+                    return hit
+            return None
+
+        for i in range(self._tree.topLevelItemCount()):
+            hit = find(self._tree.topLevelItem(i))
+            if hit:
+                self._tree.setCurrentItem(hit)
+                self._tree.scrollToItem(hit)
+                return
 
     def _on_selection_changed(self):
         item = self._tree.currentItem()
@@ -421,6 +443,7 @@ class RSpaceGUI(QMainWindow):
         form = self._make_form()
         self._csv_meta_path = QLineEdit()
         self._csv_meta_path.setPlaceholderText("metadata_12345.json")
+        self._csv_meta_path.textChanged.connect(self._on_csv_meta_path_changed)
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse_metadata_json)
         row = QHBoxLayout()
@@ -440,6 +463,37 @@ class RSpaceGUI(QMainWindow):
         self._csv_include_preprocessed.setToolTip(
             "Add a column flagging whether each entry carries the 'preprocessed' tag.")
         layout.addWidget(self._csv_include_preprocessed)
+        self._csv_include_results = QCheckBox("Add a 'results' column")
+        self._csv_include_results.setToolTip(
+            "Add a column flagging whether each entry carries the 'results' tag.")
+        layout.addWidget(self._csv_include_results)
+
+        # Optional: restrict the summary to certain methods (from the metadata file).
+        self._csv_all_methods = []
+        self._csv_selected_methods = []
+        self._csv_only_methods_chk = QCheckBox("Only include certain methods")
+        self._csv_only_methods_chk.setToolTip(
+            "Restrict the summary to entries carrying one of the chosen method (m_) tags.")
+        self._csv_only_methods_chk.toggled.connect(self._on_csv_only_methods_toggled)
+        layout.addWidget(self._csv_only_methods_chk)
+
+        self._csv_methods_box = QWidget()
+        self._csv_methods_box.setVisible(False)
+        mbox = QVBoxLayout(self._csv_methods_box)
+        mbox.setContentsMargins(16, 0, 0, 0)
+        mbox.setSpacing(4)
+        self._csv_method_search = QLineEdit()
+        self._csv_method_search.setPlaceholderText("Search methods…")
+        self._csv_method_search.textChanged.connect(self._rebuild_csv_methods_available)
+        mbox.addWidget(self._csv_method_search)
+        self._csv_method_available = QListWidget()
+        self._csv_method_available.setMaximumHeight(110)
+        mbox.addWidget(self._csv_method_available)
+        mbox.addWidget(QLabel("Chosen methods:"))
+        self._csv_method_selected = QListWidget()
+        self._csv_method_selected.setMaximumHeight(80)
+        mbox.addWidget(self._csv_method_selected)
+        layout.addWidget(self._csv_methods_box)
 
         btn = QPushButton("Create Summary CSV")
         btn.clicked.connect(self._run_create_csv)
@@ -457,6 +511,57 @@ class RSpaceGUI(QMainWindow):
         if path:
             self._csv_meta_path.setText(path)
 
+    # Method filter (populated from the selected metadata file)
+
+    def _on_csv_meta_path_changed(self, *_):
+        if self._csv_only_methods_chk.isChecked():
+            self._load_csv_methods()
+
+    def _on_csv_only_methods_toggled(self, checked):
+        self._csv_methods_box.setVisible(checked)
+        if checked:
+            self._load_csv_methods()
+
+    def _load_csv_methods(self):
+        path = self._csv_meta_path.text().strip()
+        if not path:
+            self._csv_all_methods = []
+            self._rebuild_csv_methods_available()
+            self._set_status("Choose a metadata JSON to list its methods.")
+            return
+        try:
+            self._csv_all_methods = rspace.methods_in_metadata(path)
+        except Exception as exc:
+            self._csv_all_methods = []
+            self._show_error(f"Could not read methods from {path}: {exc}")
+        # drop selections no longer present in the file
+        self._csv_selected_methods = [m for m in self._csv_selected_methods
+                                      if m in self._csv_all_methods]
+        self._rebuild_csv_methods_available()
+        self._rebuild_csv_methods_selected()
+
+    def _rebuild_csv_methods_available(self, *_):
+        query = self._csv_method_search.text().strip().lower()
+        available = [m for m in self._csv_all_methods
+                     if m not in self._csv_selected_methods and query in m.lower()]
+        self._fill_tag_list(self._csv_method_available, available, "+", self._add_csv_method)
+
+    def _rebuild_csv_methods_selected(self):
+        self._fill_tag_list(self._csv_method_selected, self._csv_selected_methods,
+                            "✕", self._remove_csv_method)
+
+    def _add_csv_method(self, method):
+        if method not in self._csv_selected_methods:
+            self._csv_selected_methods.append(method)
+            self._rebuild_csv_methods_selected()
+            self._rebuild_csv_methods_available()
+
+    def _remove_csv_method(self, method):
+        if method in self._csv_selected_methods:
+            self._csv_selected_methods.remove(method)
+            self._rebuild_csv_methods_selected()
+            self._rebuild_csv_methods_available()
+
     def _run_create_csv(self):
         path = self._csv_meta_path.text().strip()
         if not path:
@@ -466,10 +571,18 @@ class RSpaceGUI(QMainWindow):
         if not output_dir:
             self._print("Please choose an output folder ('Save to').")
             return
+        methods = None
+        if self._csv_only_methods_chk.isChecked():
+            if not self._csv_selected_methods:
+                self._print("Please choose at least one method, or untick 'Only include certain methods'.")
+                return
+            methods = list(self._csv_selected_methods)
         self._set_status("Creating summary CSV…")
         self._run(rspace.create_summary_csv, self._show_csv_result, path, output_dir,
                   self._csv_exclude_no_method.isChecked(),
-                  self._csv_include_preprocessed.isChecked())
+                  self._csv_include_preprocessed.isChecked(),
+                  methods,
+                  self._csv_include_results.isChecked())
 
     def _show_csv_result(self, path):
         self._csv_last_path = path
@@ -629,6 +742,49 @@ class RSpaceGUI(QMainWindow):
         form.addRow("Comment / Content:", self._create_content)
 
         layout.addLayout(form)
+
+        # ── Drafts / autosave ──
+        self._create_active_draft_id = None
+        self._create_active_draft_path = None
+        self._create_autosave_timer = QTimer(self)
+        self._create_autosave_timer.setInterval(60000)  # once per minute
+        self._create_autosave_timer.timeout.connect(self._create_autosave_now)
+
+        drafts_box = QGroupBox("Drafts (autosave)")
+        drafts_layout = QVBoxLayout(drafts_box)
+        drafts_layout.setSpacing(4)
+
+        self._create_autosave_chk = QCheckBox("Autosave this draft every minute")
+        self._create_autosave_chk.setToolTip(
+            "Periodically saves the form to the Autosaved/ folder so a crash doesn't lose "
+            "your notes. The draft can be reloaded below.")
+        self._create_autosave_chk.toggled.connect(self._on_create_autosave_toggled)
+        drafts_layout.addWidget(self._create_autosave_chk)
+
+        self._create_autosave_status = QLabel("")
+        self._create_autosave_status.setWordWrap(True)
+        drafts_layout.addWidget(self._create_autosave_status)
+
+        load_row = QHBoxLayout()
+        load_row.addWidget(QLabel("Load draft:"))
+        self._create_draft_combo = QComboBox()
+        load_row.addWidget(self._create_draft_combo, stretch=1)
+        load_btn = QPushButton("Load")
+        load_btn.clicked.connect(self._load_selected_draft)
+        load_row.addWidget(load_btn)
+        refresh_btn = QPushButton("↺")
+        refresh_btn.setFixedWidth(28)
+        refresh_btn.setToolTip("Refresh the list of saved drafts")
+        refresh_btn.clicked.connect(self._refresh_create_drafts)
+        load_row.addWidget(refresh_btn)
+        drafts_layout.addLayout(load_row)
+
+        self._create_delete_on_publish_chk = QCheckBox("Delete this draft after publishing")
+        drafts_layout.addWidget(self._create_delete_on_publish_chk)
+
+        layout.addWidget(drafts_box)
+        self._refresh_create_drafts()
+
         btn = QPushButton("Create Entry")
         btn.clicked.connect(self._run_create_entry)
         layout.addWidget(btn)
@@ -799,6 +955,99 @@ class RSpaceGUI(QMainWindow):
             lines.append(f"  {data.get('globalId')}  {data.get('name')}  [tags: {data.get('tags')}]")
         self._print("\n".join(lines))
         self._set_status(f"Created {n} entr{'y' if n == 1 else 'ies'}")
+
+        if self._create_delete_on_publish_chk.isChecked() and self._create_active_draft_path:
+            rspace.delete_draft(self._create_active_draft_path)
+            self._create_active_draft_path = None
+            self._create_active_draft_id = None
+            self._create_autosave_chk.setChecked(False)  # also stops the timer
+            self._refresh_create_drafts()
+            self._print("Deleted the autosaved draft.")
+
+    # ── Create tab — autosave / drafts ───────────────────────────────────────────
+
+    def _create_form_state(self):
+        names = [name for name, _ in self._create_entry_items() if name]
+        return {
+            "folder_id": self._create_folder.current_folder_id(),
+            "subjects": self._create_subject_id_tags(),
+            "date": self._create_date.text(),
+            "time": self._create_time.text(),
+            "extra": self._create_extra.text(),
+            "tags": list(self._create_selected_tags),
+            "content": self._create_content.toPlainText(),
+            "name": names[0] if names else "(unnamed draft)",
+        }
+
+    def _on_create_autosave_toggled(self, checked):
+        if checked:
+            if not self._create_active_draft_id:
+                self._create_active_draft_id = datetime.now().strftime("draft_%Y%m%d_%H%M%S")
+            self._create_autosave_now()
+            self._create_autosave_timer.start()
+        else:
+            self._create_autosave_timer.stop()
+
+    def _create_autosave_now(self):
+        if not self._create_active_draft_id:
+            self._create_active_draft_id = datetime.now().strftime("draft_%Y%m%d_%H%M%S")
+        try:
+            self._create_active_draft_path = rspace.save_draft(
+                self._create_active_draft_id, self._create_form_state())
+            self._create_autosave_status.setText(
+                f"Autosaved at {datetime.now().strftime('%H:%M:%S')} "
+                f"→ {self._create_active_draft_id}.json")
+            self._refresh_create_drafts()
+        except Exception as exc:
+            self._show_error(f"Autosave failed: {exc}")
+
+    def _refresh_create_drafts(self):
+        drafts = rspace.list_drafts()
+        self._create_draft_combo.clear()
+        for d in drafts:
+            label = d["name"] + (f"  ({d['saved_at']})" if d["saved_at"] else "")
+            self._create_draft_combo.addItem(label, d["path"])
+
+    def _load_selected_draft(self):
+        path = self._create_draft_combo.currentData()
+        if not path:
+            self._print("No saved draft to load.")
+            return
+        try:
+            data = rspace.load_draft(path)
+        except Exception as exc:
+            self._show_error(f"Could not load draft: {exc}")
+            return
+        self._load_create_draft(data)
+        self._create_active_draft_path = path
+        self._create_active_draft_id = Path(path).stem
+        self._set_status(f"Loaded draft: {data.get('name', '')}")
+
+    def _load_create_draft(self, data):
+        self._create_folder.select_by_id(data.get("folder_id"))
+        self._set_subjects(data.get("subjects") or [])
+        self._create_date.setText(data.get("date", ""))
+        self._create_time.setText(data.get("time", ""))
+        self._create_extra.setText(data.get("extra", ""))
+        self._create_selected_tags = list(data.get("tags") or [])
+        self._rebuild_create_selected()
+        self._rebuild_create_available()
+        self._create_content.setPlainText(data.get("content", ""))
+        self._update_create_name_preview()
+
+    def _set_subjects(self, tags):
+        # Clear all subject rows, then add one per tag (always at least one row).
+        while self._create_subjects_layout.count():
+            item = self._create_subjects_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._create_id_combos = []
+        for _ in (tags or [None]):
+            self._add_subject_row()
+        for combo, tag in zip(self._create_id_combos, tags or []):
+            combo.setCurrentText(tag)
+        self._update_create_name_preview()
 
     # ── Tab: Project Overview ──────────────────────────────────────────────────
 

@@ -49,9 +49,11 @@ __all__ = [
     "strip_tag_prefix", "current_date_time", "parse_entry_name",
     "ID_PREFIX", "METHOD_PREFIX", "SUMMARY_FIELDS",
     # local data processing (no network)
-    "summarize_documents", "create_summary_csv",
+    "summarize_documents", "create_summary_csv", "methods_in_metadata",
     "filepaths_for_rows", "generate_filepaths",
     "build_renamed_name", "rename_and_organize_files",
+    # drafts / autosave (in-folder JSON)
+    "autosave_dir", "save_draft", "list_drafts", "load_draft", "delete_draft",
     # stored-credentials convenience
     "load_credentials", "save_credentials", "has_credentials", "default_client",
     "check_connection", "test_credentials",
@@ -119,9 +121,21 @@ def _ensure_dir(output_dir):
 # ── Local data processing (no network) ────────────────────────────────────────────
 
 PREPROCESSED_TAG = "preprocessed"
+RESULTS_TAG = "results"
 
 
-def summarize_documents(docs, exclude_no_method=False, include_preprocessed=False):
+def methods_in_metadata(metadata_file):
+    """Return the sorted unique method ("m_") tags present in a metadata JSON file."""
+    with open(metadata_file) as f:
+        docs = json.load(f)
+    methods = set()
+    for doc in docs:
+        methods.update(t for t in _split_tags(doc.get("tags")) if t.startswith(METHOD_PREFIX))
+    return sorted(methods)
+
+
+def summarize_documents(docs, exclude_no_method=False, include_preprocessed=False,
+                        methods=None, include_results=False):
     """Turn a list of RSpace document dicts into summary rows.
 
     One row per subject ("id_") tag found on a document. The ``mouseID`` and
@@ -132,9 +146,12 @@ def summarize_documents(docs, exclude_no_method=False, include_preprocessed=Fals
     Options:
       - ``exclude_no_method``: skip documents that have no method ("m_") tag
         (the entries that would otherwise land under "unknown_method").
-      - ``include_preprocessed``: add a ``preprocessed`` column ("yes"/"no")
-        flagging whether the document carries the "preprocessed" tag.
+      - ``methods``: an iterable of method ("m_") tags; when non-empty, only keep
+        documents that carry at least one of them.
+      - ``include_preprocessed`` / ``include_results``: add a ``preprocessed`` /
+        ``results`` column ("yes"/"no") flagging whether the document carries that tag.
     """
+    method_filter = set(methods) if methods else None
     rows = []
     for doc in docs:
         date, time, extra = parse_entry_name(doc.get("name", ""))
@@ -145,9 +162,12 @@ def summarize_documents(docs, exclude_no_method=False, include_preprocessed=Fals
         experimenter = f"{first}_{last}"
 
         all_tags = _split_tags(doc.get("tags"))
-        method = ";".join(strip_tag_prefix(t) for t in all_tags if t.startswith(METHOD_PREFIX))
-        if exclude_no_method and not method:
+        method_tags = [t for t in all_tags if t.startswith(METHOD_PREFIX)]
+        if exclude_no_method and not method_tags:
             continue
+        if method_filter is not None and not (set(method_tags) & method_filter):
+            continue
+        method = ";".join(strip_tag_prefix(t) for t in method_tags)
         tags = ";".join(all_tags)
 
         for tag in all_tags:
@@ -163,26 +183,32 @@ def summarize_documents(docs, exclude_no_method=False, include_preprocessed=Fals
                 }
                 if include_preprocessed:
                     row[PREPROCESSED_TAG] = "yes" if PREPROCESSED_TAG in all_tags else "no"
+                if include_results:
+                    row[RESULTS_TAG] = "yes" if RESULTS_TAG in all_tags else "no"
                 rows.append(row)
     return rows
 
 
 def create_summary_csv(metadata_file, output_dir, exclude_no_method=False,
-                       include_preprocessed=False):
+                       include_preprocessed=False, methods=None, include_results=False):
     """Read a metadata JSON file, summarise it (see :func:`summarize_documents`) and
     write a ``summary_<stem>.csv`` into output_dir. Returns the CSV path.
 
-    ``exclude_no_method`` drops entries with no method tag; ``include_preprocessed``
-    adds a "preprocessed" column.
+    ``exclude_no_method`` drops entries with no method tag; ``methods`` restricts to
+    documents carrying one of the given method tags; ``include_preprocessed`` /
+    ``include_results`` add the corresponding flag columns.
     """
     meta_path = Path(metadata_file)
     with open(meta_path) as f:
         docs = json.load(f)
-    rows = summarize_documents(docs, exclude_no_method, include_preprocessed)
+    rows = summarize_documents(docs, exclude_no_method, include_preprocessed,
+                               methods, include_results)
 
     fieldnames = list(SUMMARY_FIELDS)
     if include_preprocessed:
         fieldnames.append(PREPROCESSED_TAG)
+    if include_results:
+        fieldnames.append(RESULTS_TAG)
 
     out = _ensure_dir(output_dir) / f"summary_{meta_path.stem}.csv"
     with open(out, "w", newline="") as f:
@@ -626,6 +652,60 @@ class RSpaceClient:
             for name, record in rows:
                 writer.writerow([name] + [record.get(c, "") for c in columns])
         return str(out)
+
+
+# ── Drafts / autosave (in-folder JSON) ──────────────────────────────────────────────
+# Stores in-progress entry drafts as JSON files inside the application folder
+# (``<project>/Autosaved``), so an unsaved note survives a crash and can be reloaded.
+
+def autosave_dir():
+    """Return the drafts directory: ``$RSPACE_AUTOSAVE_DIR`` if set, else
+    ``<project>/Autosaved`` (this file lives in ``<project>/src``)."""
+    override = os.environ.get("RSPACE_AUTOSAVE_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "Autosaved"
+
+
+def save_draft(draft_id, data):
+    """Write a draft dict to ``<autosave_dir>/<draft_id>.json`` (stamping ``saved_at``)
+    and return the path."""
+    record = dict(data)
+    record["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    out = _ensure_dir(autosave_dir()) / f"{draft_id}.json"
+    out.write_text(json.dumps(record, indent=2))
+    return str(out)
+
+
+def list_drafts():
+    """Return saved drafts as ``[{path, id, name, saved_at}]``, newest first."""
+    drafts = []
+    d = autosave_dir()
+    if not d.exists():
+        return drafts
+    for path in d.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            data = {}
+        drafts.append({
+            "path": str(path),
+            "id": path.stem,
+            "name": data.get("name") or path.stem,
+            "saved_at": data.get("saved_at", ""),
+        })
+    drafts.sort(key=lambda d: d["saved_at"], reverse=True)
+    return drafts
+
+
+def load_draft(path):
+    """Return the draft dict stored at `path`."""
+    return json.loads(Path(path).read_text())
+
+
+def delete_draft(path):
+    """Delete the draft file at `path` (ignored if it doesn't exist)."""
+    Path(path).unlink(missing_ok=True)
 
 
 # ── Stored-credentials convenience layer (optional) ─────────────────────────────────
