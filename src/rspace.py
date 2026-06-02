@@ -49,13 +49,14 @@ __all__ = [
     "strip_tag_prefix", "current_date_time", "parse_entry_name",
     "ID_PREFIX", "METHOD_PREFIX", "SUMMARY_FIELDS",
     # local data processing (no network)
-    "summarize_documents", "create_summary_csv", "methods_in_metadata",
+    "summarize_documents", "create_summary_csv", "filterable_tags",
     "filepaths_for_rows", "generate_filepaths",
     "build_renamed_name", "rename_and_organize_files",
     # drafts / autosave (in-folder JSON)
     "autosave_dir", "save_draft", "list_drafts", "load_draft", "delete_draft",
     # stored-credentials convenience
     "load_credentials", "save_credentials", "has_credentials", "default_client",
+    "load_lab_group", "save_lab_group",
     "check_connection", "test_credentials",
     "get_tags", "list_all_folders", "create_tree", "get_metadata_in_folder",
     "get_dates_for_tag", "get_times_for_tag_and_date", "project_overview",
@@ -122,20 +123,24 @@ def _ensure_dir(output_dir):
 
 PREPROCESSED_TAG = "preprocessed"
 RESULTS_TAG = "results"
+# Where processed/result data files are organised (see filepaths_for_rows).
+LAB_GROUP = "ag_beck"
 
 
-def methods_in_metadata(metadata_file):
-    """Return the sorted unique method ("m_") tags present in a metadata JSON file."""
+def filterable_tags(metadata_file):
+    """Return the sorted tags in a metadata file that make sense as summary filters:
+    the special "preprocessed"/"results" tags and any method ("m_") tags present."""
     with open(metadata_file) as f:
         docs = json.load(f)
-    methods = set()
+    tags = set()
     for doc in docs:
-        methods.update(t for t in _split_tags(doc.get("tags")) if t.startswith(METHOD_PREFIX))
-    return sorted(methods)
+        for t in _split_tags(doc.get("tags")):
+            if t in (PREPROCESSED_TAG, RESULTS_TAG) or t.startswith(METHOD_PREFIX):
+                tags.add(t)
+    return sorted(tags)
 
 
-def summarize_documents(docs, exclude_no_method=False, include_preprocessed=False,
-                        methods=None, include_results=False):
+def summarize_documents(docs, filter_tags=None):
     """Turn a list of RSpace document dicts into summary rows.
 
     One row per subject ("id_") tag found on a document. The ``mouseID`` and
@@ -143,15 +148,11 @@ def summarize_documents(docs, exclude_no_method=False, include_preprocessed=Fals
     while ``tags`` keeps the raw tag list. Each row is a dict keyed by
     :data:`SUMMARY_FIELDS`.
 
-    Options:
-      - ``exclude_no_method``: skip documents that have no method ("m_") tag
-        (the entries that would otherwise land under "unknown_method").
-      - ``methods``: an iterable of method ("m_") tags; when non-empty, only keep
-        documents that carry at least one of them.
-      - ``include_preprocessed`` / ``include_results``: add a ``preprocessed`` /
-        ``results`` column ("yes"/"no") flagging whether the document carries that tag.
+    If ``filter_tags`` is a non-empty collection, only documents carrying at least
+    one of those tags are included (an OR filter — e.g. select "preprocessed" and
+    "m_mea" to keep entries that are preprocessed *or* used that method).
     """
-    method_filter = set(methods) if methods else None
+    keep = set(filter_tags) if filter_tags else None
     rows = []
     for doc in docs:
         date, time, extra = parse_entry_name(doc.get("name", ""))
@@ -162,87 +163,98 @@ def summarize_documents(docs, exclude_no_method=False, include_preprocessed=Fals
         experimenter = f"{first}_{last}"
 
         all_tags = _split_tags(doc.get("tags"))
-        method_tags = [t for t in all_tags if t.startswith(METHOD_PREFIX)]
-        if exclude_no_method and not method_tags:
+        if keep is not None and not (set(all_tags) & keep):
             continue
-        if method_filter is not None and not (set(method_tags) & method_filter):
-            continue
-        method = ";".join(strip_tag_prefix(t) for t in method_tags)
+        method = ";".join(strip_tag_prefix(t) for t in all_tags if t.startswith(METHOD_PREFIX))
         tags = ";".join(all_tags)
 
-        for tag in all_tags:
-            if tag.startswith(ID_PREFIX):
-                row = {
-                    "mouseID": strip_tag_prefix(tag),
-                    "date": date,
-                    "time": time,
-                    "experimenter_name": experimenter,
-                    "method": method,
-                    "tags": tags,
-                    "extra": extra,
-                }
-                if include_preprocessed:
-                    row[PREPROCESSED_TAG] = "yes" if PREPROCESSED_TAG in all_tags else "no"
-                if include_results:
-                    row[RESULTS_TAG] = "yes" if RESULTS_TAG in all_tags else "no"
-                rows.append(row)
+        def _row(mouse_id):
+            return {
+                "mouseID": mouse_id,
+                "date": date,
+                "time": time,
+                "experimenter_name": experimenter,
+                "method": method,
+                "tags": tags,
+                "extra": extra,
+            }
+
+        id_tags = [t for t in all_tags if t.startswith(ID_PREFIX)]
+        if id_tags:
+            rows.extend(_row(strip_tag_prefix(t)) for t in id_tags)
+        elif PREPROCESSED_TAG in all_tags or RESULTS_TAG in all_tags:
+            # Results/preprocessed entries (e.g. analysis outputs) have no subject ID
+            # but should still appear so their file paths can be generated.
+            rows.append(_row(""))
     return rows
 
 
-def create_summary_csv(metadata_file, output_dir, exclude_no_method=False,
-                       include_preprocessed=False, methods=None, include_results=False):
+def create_summary_csv(metadata_file, output_dir, filter_tags=None):
     """Read a metadata JSON file, summarise it (see :func:`summarize_documents`) and
     write a ``summary_<stem>.csv`` into output_dir. Returns the CSV path.
 
-    ``exclude_no_method`` drops entries with no method tag; ``methods`` restricts to
-    documents carrying one of the given method tags; ``include_preprocessed`` /
-    ``include_results`` add the corresponding flag columns.
+    ``filter_tags`` (optional) keeps only entries carrying at least one of the given
+    tags (preprocessed / results / method tags).
     """
     meta_path = Path(metadata_file)
     with open(meta_path) as f:
         docs = json.load(f)
-    rows = summarize_documents(docs, exclude_no_method, include_preprocessed,
-                               methods, include_results)
-
-    fieldnames = list(SUMMARY_FIELDS)
-    if include_preprocessed:
-        fieldnames.append(PREPROCESSED_TAG)
-    if include_results:
-        fieldnames.append(RESULTS_TAG)
+    rows = summarize_documents(docs, filter_tags)
 
     out = _ensure_dir(output_dir) / f"summary_{meta_path.stem}.csv"
     with open(out, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
     return str(out)
 
 
-def filepaths_for_rows(rows):
+def filepaths_for_rows(rows, lab_group=LAB_GROUP):
     """Build organised file paths from summary rows (dicts shaped like
     :func:`summarize_documents` output).
 
-    Returns a list of (mouseID, "method/experimenter/mouseID_date_time_extra") pairs;
-    the method falls back to "unknown_method" when absent.
+    Returns a list of (mouseID, filepath) pairs. The filename is
+    ``mouseID_date_time_extra`` (omitting empty parts — e.g. an ID-less results entry
+    just uses its date_time_extra / name); its directory depends on the entry's tags:
+
+      - tagged ``preprocessed`` → ``processed_data/<lab>/<experimenter>/preprocessed/…``
+      - tagged ``results``      → ``processed_data/<lab>/<experimenter>/results/…``
+      - otherwise (raw data)    → ``<method>/<experimenter>/…`` (method falls back to
+        "unknown_method").
+
+    An entry carrying both ``preprocessed`` and ``results`` yields one path for each.
     """
     pairs = []
     for row in rows:
-        method = next((m for m in (row.get("method") or "").split(";") if m), "unknown_method")
         experimenter = row.get("experimenter_name", "")
         mouse_id = row.get("mouseID", "")
-        parts = [mouse_id] + [p for p in (row.get("date", ""), row.get("time", ""),
-                                          row.get("extra", "")) if p]
-        pairs.append((mouse_id, f"{method}/{experimenter}/{'_'.join(parts)}"))
+        tags = [t for t in (row.get("tags") or "").split(";") if t]
+        parts = [p for p in (mouse_id, row.get("date", ""), row.get("time", ""),
+                             row.get("extra", "")) if p]
+        filename = "_".join(parts)
+
+        dirs = []
+        if PREPROCESSED_TAG in tags:
+            dirs.append(f"processed_data/{lab_group}/{experimenter}/{PREPROCESSED_TAG}")
+        if RESULTS_TAG in tags:
+            dirs.append(f"processed_data/{lab_group}/{experimenter}/{RESULTS_TAG}")
+        if not dirs:  # raw data → grouped by method
+            method = next((m for m in (row.get("method") or "").split(";") if m), "unknown_method")
+            dirs.append(f"{method}/{experimenter}")
+
+        for d in dirs:
+            pairs.append((mouse_id, f"{d}/{filename}"))
     return pairs
 
 
-def generate_filepaths(summary_csv, output_dir):
+def generate_filepaths(summary_csv, output_dir, lab_group=None):
     """Read a summary CSV, build organised file paths (see :func:`filepaths_for_rows`)
     and write them to ``filepaths_<stem>.csv`` (columns: mouseID, filepath) in
-    output_dir. Returns the written CSV path."""
+    output_dir. Returns the written CSV path. ``lab_group`` defaults to the saved
+    setting (``load_lab_group()``)."""
     with open(summary_csv, newline="") as f:
         rows = list(csv.DictReader(f))
-    pairs = filepaths_for_rows(rows)
+    pairs = filepaths_for_rows(rows, lab_group or load_lab_group())
 
     out = _ensure_dir(output_dir) / f"filepaths_{Path(summary_csv).stem}.csv"
     with open(out, "w", newline="") as f:
@@ -621,8 +633,11 @@ class RSpaceClient:
         first-seen order) and ``rows`` is a list of (document_name, {field: value}).
         """
         columns, seen, rows = [], set(), []
-        for doc in self.list_documents(folder_id):
-            full = self.get_document(doc["id"])
+        for doc in self.documents_in_folder(folder_id):
+            try:
+                full = self.get_document(doc["id"])
+            except Exception:
+                continue  # skip documents we can't read (e.g. some shared items)
             fields = sorted(full.get("fields", []) or [], key=lambda f: f.get("columnIndex", 0))
             record = {}
             for field in fields:
@@ -638,6 +653,25 @@ class RSpaceClient:
                     columns.append(name)
             rows.append((doc.get("name", ""), record))
         return columns, rows
+
+    def documents_in_folder(self, folder_id, _visited=None):
+        """Return all documents within a folder subtree as ``[{id, name}]``.
+
+        Walks the ``folders/tree`` endpoint recursively, which (unlike the global
+        ``/documents`` listing) also reaches documents in **shared** folders and in
+        nested subfolders/notebooks.
+        """
+        if _visited is None:
+            _visited = set()
+        docs = []
+        for rec in self._tree_records(folder_id):
+            rtype = (rec.get("type") or "").upper()
+            if rtype == "DOCUMENT":
+                docs.append({"id": rec.get("id"), "name": rec.get("name", "")})
+            elif rtype in ("FOLDER", "NOTEBOOK") and rec.get("id") not in _visited:
+                _visited.add(rec["id"])
+                docs.extend(self.documents_in_folder(rec["id"], _visited))
+        return docs
 
     def project_overview(self, folder_id, output_dir):
         """Write an overview CSV (see :meth:`overview`) for a folder into output_dir;
@@ -731,6 +765,23 @@ def _config_file():
     return _config_dir() / "config.json"
 
 
+def _read_config():
+    """Return the config.json contents as a dict (empty dict if missing/unreadable)."""
+    cfg = _config_file()
+    if cfg.exists():
+        try:
+            return json.loads(cfg.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _write_config(cfg):
+    """Write the config dict to config.json (creating the folder if needed)."""
+    _ensure_dir(_config_dir())
+    _config_file().write_text(json.dumps(cfg, indent=2))
+
+
 def _legacy_credential_files():
     """Old locations checked once (for one-time migration into the project config):
     a per-user OS config dir from earlier versions, and a legacy APIkey.txt."""
@@ -781,14 +832,11 @@ def load_credentials():
     if _credentials is not None:
         return _credentials
 
-    cfg = _config_file()
-    if cfg.exists():
-        try:
-            data = json.loads(cfg.read_text())
+    if _config_file().exists():
+        data = _read_config()
+        if "api_key" in data or "url" in data:
             _credentials = (data.get("api_key", ""), data.get("url") or DEFAULT_RSPACE_URL)
             return _credentials
-        except Exception:
-            pass  # fall through to migration / defaults
 
     migrated = _read_legacy_credentials()
     if migrated and migrated[0]:
@@ -800,12 +848,13 @@ def load_credentials():
 
 
 def save_credentials(api_key, url):
-    """Persist credentials to the user config file and refresh the default client."""
+    """Persist credentials (preserving other config keys) and refresh the default client."""
     global _credentials, _default_client
     url = (url or DEFAULT_RSPACE_URL).rstrip("/")
     api_key = (api_key or "").strip()
-    _ensure_dir(_config_dir())
-    _config_file().write_text(json.dumps({"api_key": api_key, "url": url}, indent=2))
+    cfg = _read_config()
+    cfg["api_key"], cfg["url"] = api_key, url
+    _write_config(cfg)
     _credentials = (api_key, url)
     _default_client = None  # rebuilt lazily with the new credentials
     return _credentials
@@ -814,6 +863,19 @@ def save_credentials(api_key, url):
 def has_credentials():
     """True if an API key has been configured."""
     return bool(load_credentials()[0])
+
+
+def load_lab_group():
+    """Return the configured lab group for processed-data paths (default ``ag_beck``)."""
+    return _read_config().get("lab_group") or LAB_GROUP
+
+
+def save_lab_group(lab_group):
+    """Persist the lab group (preserving other config keys); blank falls back to default."""
+    cfg = _read_config()
+    cfg["lab_group"] = (lab_group or "").strip() or LAB_GROUP
+    _write_config(cfg)
+    return cfg["lab_group"]
 
 
 def default_client():

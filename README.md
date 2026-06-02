@@ -4,9 +4,9 @@ A desktop application (and reusable Python module) for working with the
 [RSpace](https://www.researchspace.com/) electronic lab notebook at the **Institute of
 Experimental Epileptology and Cognition Research (IEECR)**.
 
-It helps lab members **create structured entries**, **organise/rename local data files**,
-and **export overviews** of a project — all from a simple tabbed interface, talking to
-RSpace through its REST API.
+It helps lab members **create structured entries**, **log analysis results**,
+**organise/rename local data files**, and **export overviews** of a project — all from a
+simple tabbed interface, talking to RSpace through its REST API.
 
 The whole program lives in **one self-contained folder** (ImageJ-style): you download it,
 double-click a launcher, and everything it needs — a private Python, the dependencies,
@@ -44,24 +44,27 @@ The interface is organised into tabs:
 
 | Tab | What it does |
 |-----|--------------|
-| **Create Entry** | Create one or more entries in a chosen RSpace folder. Pick the subject ID(s) — use **Add subject +** for several animals at once — set the date/time (or tick *Fill in current date & time*), add a short name and any extra tags, and preview the resulting name (`ID_date_time_name`). One entry is created per subject, each tagged with its own subject ID plus the shared tags. |
-| **Rename Files** | Rename local data files with a structured `ID_date_time` prefix (the ID is looked up from RSpace tags). Optionally erase characters from the original name, move the files into a new folder, and/or copy them to a raw-data location. |
+| **Create Entry** | Create one or more entries in a chosen RSpace folder. Pick the subject ID(s) — use **Add subject +** for several animals at once — set the date/time (or tick *Fill in current date & time*), add a short name and any extra tags, and preview the resulting name `date_time_name`. One entry is created per subject, each tagged with its own subject ID plus the shared tags. An optional **autosave** saves the in-progress draft to the `Autosaved/` folder once a minute; drafts can be reloaded from a dropdown, and optionally deleted after publishing. |
+| **Rename Files** | Rename local data files with a structured `ID_date_time` prefix (the ID is looked up from RSpace tags, prefix stripped). Optionally erase characters from the original name, move the files into a new folder, and/or copy them to a raw-data location. |
 | **Fetch Metadata** | Download the metadata of all documents in a folder as a JSON file (the starting point for the CSV tools). |
-| **Summary CSV** | Turn fetched metadata into a spreadsheet — one row per subject — with options to *exclude entries without a known method* and to *add a `preprocessed` column*. |
-| **File Paths** | Generate a suggested, organised file path for each entry (`method/experimenter/filename`) and save them as a CSV. |
-| **Project Overview** | Build a spreadsheet of a whole folder: one row per document, one column per form field (header = field name, cell = value). |
-| **Settings** | Store and test your API key and server URL. |
+| **Summary CSV** | Turn fetched metadata into a spreadsheet — one row per subject. Optionally **filter** entries by tag: add `preprocessed`, `results`, or any method found in the file, and only entries carrying **any** of the selected tags are kept. |
+| **File Paths** | Generate a suggested, organised file path for each entry and save them as a CSV. Raw entries go to `method/experimenter/filename`; entries tagged `preprocessed` or `results` go to `processed_data/<lab group>/<experimenter>/<preprocessed\|results>/filename`. |
+| **Project Overview** | Build a spreadsheet of a whole folder: one row per document, one column per form field (header = field name, cell = value). Works for shared folders too. |
+| **Results Entry** | Log a folder of analysis results: browse to the local **results folder** (its name becomes the entry name), pick the RSpace destination, and add a **comment** describing how the results were obtained. The entry is tagged `results`, so the File Paths tab reproduces its location as `processed_data/<lab group>/<your name>/results/<folder name>`. |
+| **Settings** | Store and test your API key and server URL, and set the **lab group** used in processed-data paths (default `ag_beck`). |
 
 The folder pickers show the **entire workspace folder tree** (folders and notebooks, at all
 depths), fetched in parallel for speed. Output locations are chosen with a file browser.
 
 ### Tag conventions
 
-Tags encode two kinds of IDs, and the tools rely on these prefixes:
+Tags carry meaning that the tools rely on:
 
 - **Subject IDs** start with `id_` (e.g. `id_OPI111`).
 - **Method IDs** start with `m_` (e.g. `m_patch_clamp`).
-- Any other tag (e.g. `preprocessed`) is treated as a plain data-state tag.
+- `preprocessed` / `results` mark a document's data state and route its generated file path
+  into `processed_data/…` (see the File Paths tab).
+- Any other tag is treated as a plain data-state tag.
 
 When an ID is used to build a *name*, the prefix is dropped (`id_OPI111` → `OPI111`).
 
@@ -89,10 +92,11 @@ client.project_overview(folder_id=12345, output_dir="~/Desktop")
 ```
 
 Stateless helpers (`strip_tag_prefix`, `summarize_documents`, `create_summary_csv`,
-`generate_filepaths`, `build_renamed_name`, …) are available as plain functions. See the
-module docstring and `__all__` for the full public API. Credentials can be supplied
-explicitly (as above) or, for the bundled app, stored in `config/config.json` via
-`save_credentials()` / `load_credentials()`.
+`filterable_tags`, `generate_filepaths`, `build_renamed_name`, …) are available as plain
+functions. See the module docstring and `__all__` for the full public API. Credentials and
+the lab group can be supplied explicitly (as above) or, for the bundled app, stored in
+`config/config.json` via `save_credentials()`/`load_credentials()` and
+`save_lab_group()`/`load_lab_group()`.
 
 ---
 
@@ -105,7 +109,8 @@ IEECRSpace/
 │   ├── rspace.py            # RSpace API client + helpers (reusable module)
 │   ├── rspace_interface.py  # the PyQt6 GUI
 │   └── IEECRlogo.png
-├── config/                  # config.json (your API key) — stays in the folder, not shared
+├── config/                  # config.json (API key, server URL, lab group) — stays local
+├── Autosaved/               # in-progress Create-Entry drafts (created when used)
 ├── Installation/
 │   ├── install.sh / install.bat   # portable setup (run automatically on first launch)
 │   └── create_package.py          # build a distributable zip
@@ -114,8 +119,8 @@ IEECRSpace/
 └── .venv/ (created on install)    # the dependency environment
 ```
 
-`config/`, `.uv/` and `.venv/` are machine-local and are never committed or shipped — your
-API key stays on your computer only.
+`config/`, `Autosaved/`, `.uv/` and `.venv/` are machine-local and are never committed or
+shipped — your API key stays on your computer only.
 
 ---
 

@@ -207,6 +207,7 @@ class RSpaceGUI(QMainWindow):
         self._tabs.addTab(self._build_csv_tab(),        "Summary CSV")
         self._tabs.addTab(self._build_filepaths_tab(),  "File Paths")
         self._tabs.addTab(self._build_overview_tab(),   "Project Overview")
+        self._tabs.addTab(self._build_results_tab(),    "Results Entry")
         self._settings_tab_index = self._tabs.addTab(self._build_settings_tab(), "Settings")
 
         # Output panel lives below the tabs in a draggable splitter, so it never
@@ -454,46 +455,29 @@ class RSpaceGUI(QMainWindow):
         form.addRow("Save to:", out_row)
         layout.addLayout(form)
 
-        self._csv_exclude_no_method = QCheckBox("Exclude entries with no known method")
-        self._csv_exclude_no_method.setToolTip(
-            "Skip entries that have no method (m_) tag — the ones that would otherwise "
-            "be filed under 'unknown_method'.")
-        layout.addWidget(self._csv_exclude_no_method)
-        self._csv_include_preprocessed = QCheckBox("Add a 'preprocessed' column")
-        self._csv_include_preprocessed.setToolTip(
-            "Add a column flagging whether each entry carries the 'preprocessed' tag.")
-        layout.addWidget(self._csv_include_preprocessed)
-        self._csv_include_results = QCheckBox("Add a 'results' column")
-        self._csv_include_results.setToolTip(
-            "Add a column flagging whether each entry carries the 'results' tag.")
-        layout.addWidget(self._csv_include_results)
-
-        # Optional: restrict the summary to certain methods (from the metadata file).
-        self._csv_all_methods = []
-        self._csv_selected_methods = []
-        self._csv_only_methods_chk = QCheckBox("Only include certain methods")
-        self._csv_only_methods_chk.setToolTip(
-            "Restrict the summary to entries carrying one of the chosen method (m_) tags.")
-        self._csv_only_methods_chk.toggled.connect(self._on_csv_only_methods_toggled)
-        layout.addWidget(self._csv_only_methods_chk)
-
-        self._csv_methods_box = QWidget()
-        self._csv_methods_box.setVisible(False)
-        mbox = QVBoxLayout(self._csv_methods_box)
-        mbox.setContentsMargins(16, 0, 0, 0)
-        mbox.setSpacing(4)
-        self._csv_method_search = QLineEdit()
-        self._csv_method_search.setPlaceholderText("Search methods…")
-        self._csv_method_search.textChanged.connect(self._rebuild_csv_methods_available)
-        mbox.addWidget(self._csv_method_search)
-        self._csv_method_available = QListWidget()
-        self._csv_method_available.setMaximumHeight(110)
-        mbox.addWidget(self._csv_method_available)
-        mbox.addWidget(QLabel("Chosen methods:"))
-        self._csv_method_selected = QListWidget()
-        self._csv_method_selected.setMaximumHeight(80)
-        mbox.addWidget(self._csv_method_selected)
-        layout.addWidget(self._csv_methods_box)
+        # Optional filter: keep only entries carrying one of the chosen tags. The
+        # choices are the "preprocessed"/"results" tags and the methods found in the
+        # selected file. Leaving it empty includes every entry.
+        self._csv_all_filters = []
+        self._csv_selected_filters = []
+        filter_box = QGroupBox("Filter entries by tag (optional)")
+        fbl = QVBoxLayout(filter_box)
+        fbl.setSpacing(4)
+        fbl.addWidget(QLabel(
+            "Add tags to keep only entries that have ANY of them (preprocessed, results, "
+            "or a method). Leave empty to include every entry."))
+        self._csv_filter_search = QLineEdit()
+        self._csv_filter_search.setPlaceholderText("Search preprocessed / results / methods…")
+        self._csv_filter_search.textChanged.connect(self._rebuild_csv_filter_available)
+        fbl.addWidget(self._csv_filter_search)
+        self._csv_filter_available = QListWidget()
+        self._csv_filter_available.setMaximumHeight(110)
+        fbl.addWidget(self._csv_filter_available)
+        fbl.addWidget(QLabel("Active filters:"))
+        self._csv_filter_selected = QListWidget()
+        self._csv_filter_selected.setMaximumHeight(80)
+        fbl.addWidget(self._csv_filter_selected)
+        layout.addWidget(filter_box)
 
         btn = QPushButton("Create Summary CSV")
         btn.clicked.connect(self._run_create_csv)
@@ -511,56 +495,48 @@ class RSpaceGUI(QMainWindow):
         if path:
             self._csv_meta_path.setText(path)
 
-    # Method filter (populated from the selected metadata file)
+    # Tag filter (populated from the selected metadata file)
 
     def _on_csv_meta_path_changed(self, *_):
-        if self._csv_only_methods_chk.isChecked():
-            self._load_csv_methods()
+        self._load_csv_filters()
 
-    def _on_csv_only_methods_toggled(self, checked):
-        self._csv_methods_box.setVisible(checked)
-        if checked:
-            self._load_csv_methods()
-
-    def _load_csv_methods(self):
+    def _load_csv_filters(self):
         path = self._csv_meta_path.text().strip()
         if not path:
-            self._csv_all_methods = []
-            self._rebuild_csv_methods_available()
-            self._set_status("Choose a metadata JSON to list its methods.")
-            return
-        try:
-            self._csv_all_methods = rspace.methods_in_metadata(path)
-        except Exception as exc:
-            self._csv_all_methods = []
-            self._show_error(f"Could not read methods from {path}: {exc}")
-        # drop selections no longer present in the file
-        self._csv_selected_methods = [m for m in self._csv_selected_methods
-                                      if m in self._csv_all_methods]
-        self._rebuild_csv_methods_available()
-        self._rebuild_csv_methods_selected()
+            self._csv_all_filters = []
+        else:
+            try:
+                self._csv_all_filters = rspace.filterable_tags(path)
+            except Exception as exc:
+                self._csv_all_filters = []
+                self._show_error(f"Could not read tags from {path}: {exc}")
+        # drop any selections no longer present in the file
+        self._csv_selected_filters = [t for t in self._csv_selected_filters
+                                      if t in self._csv_all_filters]
+        self._rebuild_csv_filter_available()
+        self._rebuild_csv_filter_selected()
 
-    def _rebuild_csv_methods_available(self, *_):
-        query = self._csv_method_search.text().strip().lower()
-        available = [m for m in self._csv_all_methods
-                     if m not in self._csv_selected_methods and query in m.lower()]
-        self._fill_tag_list(self._csv_method_available, available, "+", self._add_csv_method)
+    def _rebuild_csv_filter_available(self, *_):
+        query = self._csv_filter_search.text().strip().lower()
+        available = [t for t in self._csv_all_filters
+                     if t not in self._csv_selected_filters and query in t.lower()]
+        self._fill_tag_list(self._csv_filter_available, available, "+", self._add_csv_filter)
 
-    def _rebuild_csv_methods_selected(self):
-        self._fill_tag_list(self._csv_method_selected, self._csv_selected_methods,
-                            "✕", self._remove_csv_method)
+    def _rebuild_csv_filter_selected(self):
+        self._fill_tag_list(self._csv_filter_selected, self._csv_selected_filters,
+                            "✕", self._remove_csv_filter)
 
-    def _add_csv_method(self, method):
-        if method not in self._csv_selected_methods:
-            self._csv_selected_methods.append(method)
-            self._rebuild_csv_methods_selected()
-            self._rebuild_csv_methods_available()
+    def _add_csv_filter(self, tag):
+        if tag not in self._csv_selected_filters:
+            self._csv_selected_filters.append(tag)
+            self._rebuild_csv_filter_selected()
+            self._rebuild_csv_filter_available()
 
-    def _remove_csv_method(self, method):
-        if method in self._csv_selected_methods:
-            self._csv_selected_methods.remove(method)
-            self._rebuild_csv_methods_selected()
-            self._rebuild_csv_methods_available()
+    def _remove_csv_filter(self, tag):
+        if tag in self._csv_selected_filters:
+            self._csv_selected_filters.remove(tag)
+            self._rebuild_csv_filter_selected()
+            self._rebuild_csv_filter_available()
 
     def _run_create_csv(self):
         path = self._csv_meta_path.text().strip()
@@ -571,18 +547,9 @@ class RSpaceGUI(QMainWindow):
         if not output_dir:
             self._print("Please choose an output folder ('Save to').")
             return
-        methods = None
-        if self._csv_only_methods_chk.isChecked():
-            if not self._csv_selected_methods:
-                self._print("Please choose at least one method, or untick 'Only include certain methods'.")
-                return
-            methods = list(self._csv_selected_methods)
+        filter_tags = list(self._csv_selected_filters) or None
         self._set_status("Creating summary CSV…")
-        self._run(rspace.create_summary_csv, self._show_csv_result, path, output_dir,
-                  self._csv_exclude_no_method.isChecked(),
-                  self._csv_include_preprocessed.isChecked(),
-                  methods,
-                  self._csv_include_results.isChecked())
+        self._run(rspace.create_summary_csv, self._show_csv_result, path, output_dir, filter_tags)
 
     def _show_csv_result(self, path):
         self._csv_last_path = path
@@ -596,8 +563,9 @@ class RSpaceGUI(QMainWindow):
         w, layout = self._tab_widget()
         self._tab_header(layout, "Generate File Paths",
             "Reads the summary CSV and generates a suggested folder path for each entry, "
-            "in the format method/experimenter/filename, saving them as a CSV in the chosen "
-            "output folder. Useful for planning where files should be stored.")
+            "saving them as a CSV in the chosen output folder. Raw entries go to "
+            "method/experimenter/filename; entries tagged 'preprocessed' or 'results' go to "
+            "processed_data/ag_beck/experimenter/<preprocessed|results>/filename.")
         form = self._make_form()
         self._fp_csv_path = QLineEdit()
         self._fp_csv_path.setPlaceholderText("summary_metadata_12345.csv")
@@ -652,7 +620,7 @@ class RSpaceGUI(QMainWindow):
             "Creates one or more entries in the selected RSpace folder. Pick the folder, "
             "choose the subject ID(s) — use 'Add subject +' for several animals — set the "
             "date/time and a short name, add any extra tags, then click 'Create Entry'. One "
-            "entry is created per subject, named ID_date_time_name and tagged with that "
+            "entry is created per subject, named date_time_name and tagged with that "
             "subject's ID plus the shared tags.")
         form = self._make_form()
 
@@ -833,24 +801,31 @@ class RSpaceGUI(QMainWindow):
         return chosen
 
     def _create_entry_items(self):
-        """Return a list of (name, tags) — one per subject (or a single item if none)."""
-        base = [p for p in (self._create_date.text().strip(),
-                            self._create_time.text().strip(),
-                            self._create_extra.text().strip()) if p]
+        """Return a list of (name, tags) — one per subject (or a single item if none).
+
+        The name is date_time_extra (no subject ID prefix); the subject is recorded via
+        its id_ tag, so several subjects produce identically-named entries with different
+        ID tags.
+        """
+        name = "_".join(p for p in (self._create_date.text().strip(),
+                                    self._create_time.text().strip(),
+                                    self._create_extra.text().strip()) if p)
         subjects = self._create_subject_id_tags()
-        items = []
         if subjects:
-            for id_tag in subjects:
-                name = "_".join([rspace.strip_tag_prefix(id_tag)] + base)
-                tags = list(dict.fromkeys([id_tag] + self._create_selected_tags))
-                items.append((name, tags))
-        else:
-            items.append(("_".join(base), list(self._create_selected_tags)))
-        return items
+            return [(name, list(dict.fromkeys([id_tag] + self._create_selected_tags)))
+                    for id_tag in subjects]
+        return [(name, list(self._create_selected_tags))]
 
     def _update_create_name_preview(self, *_):
-        names = [name for name, _ in self._create_entry_items() if name]
-        self._create_name_preview.setText("\n".join(names) if names else "<name>")
+        items = self._create_entry_items()
+        name = items[0][0] if items else ""
+        n = len(self._create_subject_id_tags())
+        if not name:
+            self._create_name_preview.setText("<name>")
+        elif n > 1:
+            self._create_name_preview.setText(f"{name}   (× {n} entries, one per subject)")
+        else:
+            self._create_name_preview.setText(name)
 
     def _on_create_now_toggled(self, checked):
         if checked:  # read the clock once and fill the fields
@@ -1527,6 +1502,71 @@ class RSpaceGUI(QMainWindow):
         self._rn_file_list.clear()
         self._set_status(f"{len(final_paths)} file(s) renamed")
 
+    # ── Tab: Results Entry ───────────────────────────────────────────────────────
+
+    def _build_results_tab(self):
+        w, layout = self._tab_widget()
+        self._tab_header(layout, "Results Entry",
+            "Create an RSpace entry for a folder of analysis results. Browse to the local "
+            "results folder (its name becomes the entry name), choose where to create the "
+            "entry in RSpace, and describe what you did. The entry is tagged 'results', so the "
+            "File Paths tab reproduces its location as "
+            "processed_data/<lab>/<your name>/results/<folder name>.")
+        form = self._make_form()
+
+        # Local results folder → entry name
+        self._results_folder_path = QLineEdit()
+        self._results_folder_path.setPlaceholderText("Browse to your results subfolder…")
+        self._results_folder_path.textChanged.connect(self._update_results_preview)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(lambda: self._browse_folder(self._results_folder_path))
+        rrow = QHBoxLayout()
+        rrow.addWidget(self._results_folder_path)
+        rrow.addWidget(browse)
+        form.addRow("Results folder:", rrow)
+
+        # RSpace destination
+        self._results_target = self._make_folder_tree()
+        form.addRow("Create in:", self._results_target)
+
+        self._results_name_preview = QLabel("<choose a folder>")
+        self._results_name_preview.setWordWrap(True)
+        form.addRow("Will be created as:", self._results_name_preview)
+
+        self._results_comment = QPlainTextEdit()
+        self._results_comment.setPlaceholderText("Describe how these results were obtained…")
+        self._results_comment.setMaximumHeight(140)
+        form.addRow("Comment:", self._results_comment)
+
+        layout.addLayout(form)
+        btn = QPushButton("Create Results Entry")
+        btn.clicked.connect(self._run_create_results)
+        layout.addWidget(btn)
+        layout.addStretch()
+        return w
+
+    def _update_results_preview(self, *_):
+        name = Path(self._results_folder_path.text().strip()).name if self._results_folder_path.text().strip() else ""
+        self._results_name_preview.setText(f"{name}   (tag: results)" if name else "<choose a folder>")
+
+    def _run_create_results(self):
+        folder_id = self._results_target.current_folder_id()
+        path = self._results_folder_path.text().strip()
+        name = Path(path).name if path else ""
+        if folder_id is None or not name:
+            self._print("Please choose a results folder and an RSpace destination.")
+            return
+        comment = self._results_comment.toPlainText().strip()
+        self._set_status("Creating results entry…")
+        self._run(rspace.create_entry, self._show_results_result,
+                  folder_id, ["results"], name, comment)
+
+    def _show_results_result(self, data):
+        self._print(
+            f"Created results entry:\n"
+            f"  {data.get('globalId')}  {data.get('name')}  [tags: {data.get('tags')}]")
+        self._set_status(f"Results entry created: {data.get('globalId')}")
+
     # ── Tab: Settings ────────────────────────────────────────────────────────────
 
     def _build_settings_tab(self):
@@ -1553,6 +1593,13 @@ class RSpaceGUI(QMainWindow):
         self._settings_url = QLineEdit(url or rspace.DEFAULT_RSPACE_URL)
         self._settings_url.setPlaceholderText(rspace.DEFAULT_RSPACE_URL)
         form.addRow("Server URL:", self._settings_url)
+
+        self._settings_lab_group = QLineEdit(rspace.load_lab_group())
+        self._settings_lab_group.setPlaceholderText(rspace.LAB_GROUP)
+        self._settings_lab_group.setToolTip(
+            "Lab group used in processed-data file paths: "
+            "processed_data/<lab group>/<experimenter>/…")
+        form.addRow("Lab group:", self._settings_lab_group)
 
         layout.addLayout(form)
 
@@ -1600,6 +1647,7 @@ class RSpaceGUI(QMainWindow):
             self._settings_status.setText("Please enter an API key before saving.")
             return
         rspace.save_credentials(key, url)
+        rspace.save_lab_group(self._settings_lab_group.text().strip() or rspace.LAB_GROUP)
         self._settings_status.setText("Saved. Reloading folders…")
         self._set_status("Credentials saved — reloading folders…")
         self._run(rspace.create_tree, self._on_folders_loaded)
