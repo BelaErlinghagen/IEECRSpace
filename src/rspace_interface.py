@@ -107,7 +107,12 @@ class FolderTree(QWidget):
 
         QTreeWidgetItem(self._tree, ["Loading…"])
 
-    def populate(self, folders):
+    def populate(self, nodes):
+        """Fill the tree from the nested structure returned by ``rspace.create_tree``.
+
+        Only folders and notebooks are shown (documents would overcrowd it); the full
+        depth of the hierarchy is represented.
+        """
         self._tree.clear()
 
         if self._include_workspace:
@@ -115,31 +120,22 @@ class FolderTree(QWidget):
             ws.setData(0, _ROLE_ID, None)
             ws.setData(0, _ROLE_PATH, "Entire Workspace")
 
-        by_id = {f["id"]: f for f in folders}
-        children: dict = {}
-        roots = []
-        for f in folders:
-            pid = f.get("parentId")
-            if pid in by_id:
-                children.setdefault(pid, []).append(f)
-            else:
-                # Top-level folder, or a parent RSpace didn't return: treat as root.
-                roots.append(f)
-
-        def add(parent, f, prefix_path):
-            full = f"{prefix_path}/{f['name']}" if prefix_path else f["name"]
-            text = f"{f['name']}  [NB]" if f.get("notebook") else f["name"]
+        def add(parent, node, prefix_path):
+            if node.get("type") not in ("folder", "notebook"):
+                return  # skip documents and other items
+            full = f"{prefix_path}/{node['name']}" if prefix_path else node["name"]
+            text = f"{node['name']}  [NB]" if node.get("notebook") else node["name"]
             item = QTreeWidgetItem(parent, [text])
-            item.setData(0, _ROLE_ID, f["id"])
+            item.setData(0, _ROLE_ID, node["id"])
             item.setData(0, _ROLE_PATH, full)
             item.setToolTip(0, full)
-            for child in sorted(children.get(f["id"], []), key=lambda x: x["name"].lower()):
+            for child in node.get("children", []):
                 add(item, child, full)
 
-        for f in sorted(roots, key=lambda x: x["name"].lower()):
-            add(self._tree, f, "")
+        for node in nodes:
+            add(self._tree, node, "")
 
-        self._tree.expandAll()
+        self._tree.expandToDepth(1)  # show the first couple of levels; deeper is expandable
         if self._include_workspace:
             self._tree.setCurrentItem(self._tree.topLevelItem(0))
 
@@ -235,7 +231,7 @@ class RSpaceGUI(QMainWindow):
 
         if rspace.has_credentials():
             self._set_status("Loading folders…")
-            self._run(rspace.list_all_folders, self._on_folders_loaded)
+            self._run(rspace.create_tree, self._on_folders_loaded)
         else:
             self._set_status("Enter your API key in the Settings tab to get started.")
             self._tabs.setCurrentIndex(self._settings_tab_index)
@@ -347,18 +343,15 @@ class RSpaceGUI(QMainWindow):
 
     # ── Folder loading ─────────────────────────────────────────────────────────
 
-    def _on_folders_loaded(self, folders):
-        self._folders = folders
-        for combo in self._folder_combos:
-            combo.clear()
-            if combo.property("has_workspace"):
-                combo.addItem("— Entire Workspace —", None)
-            for f in folders:
-                icon = "[NB] " if f["notebook"] else "[F]  "
-                combo.addItem(icon + f["label"], f["id"])
+    def _on_folders_loaded(self, tree_nodes):
+        self._folders = tree_nodes
         for tree in self._folder_trees:
-            tree.populate(folders)
-        self._set_status(f"{len(folders)} folders loaded")
+            tree.populate(tree_nodes)
+
+        def count(nodes):
+            return sum(1 + count(n.get("children", [])) for n in nodes
+                       if n.get("type") in ("folder", "notebook"))
+        self._set_status(f"{count(tree_nodes)} folders / notebooks loaded")
         self._refresh_create_tags()
 
     def _output_folder_row(self):
@@ -437,6 +430,17 @@ class RSpaceGUI(QMainWindow):
         self._csv_output, out_row = self._output_folder_row()
         form.addRow("Save to:", out_row)
         layout.addLayout(form)
+
+        self._csv_exclude_no_method = QCheckBox("Exclude entries with no known method")
+        self._csv_exclude_no_method.setToolTip(
+            "Skip entries that have no method (m_) tag — the ones that would otherwise "
+            "be filed under 'unknown_method'.")
+        layout.addWidget(self._csv_exclude_no_method)
+        self._csv_include_preprocessed = QCheckBox("Add a 'preprocessed' column")
+        self._csv_include_preprocessed.setToolTip(
+            "Add a column flagging whether each entry carries the 'preprocessed' tag.")
+        layout.addWidget(self._csv_include_preprocessed)
+
         btn = QPushButton("Create Summary CSV")
         btn.clicked.connect(self._run_create_csv)
         layout.addWidget(btn)
@@ -463,7 +467,9 @@ class RSpaceGUI(QMainWindow):
             self._print("Please choose an output folder ('Save to').")
             return
         self._set_status("Creating summary CSV…")
-        self._run(rspace.create_summary_csv, self._show_csv_result, path, output_dir)
+        self._run(rspace.create_summary_csv, self._show_csv_result, path, output_dir,
+                  self._csv_exclude_no_method.isChecked(),
+                  self._csv_include_preprocessed.isChecked())
 
     def _show_csv_result(self, path):
         self._csv_last_path = path
@@ -1347,7 +1353,7 @@ class RSpaceGUI(QMainWindow):
         rspace.save_credentials(key, url)
         self._settings_status.setText("Saved. Reloading folders…")
         self._set_status("Credentials saved — reloading folders…")
-        self._run(rspace.list_all_folders, self._on_folders_loaded)
+        self._run(rspace.create_tree, self._on_folders_loaded)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

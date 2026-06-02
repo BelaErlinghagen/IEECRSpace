@@ -1,50 +1,44 @@
 @echo off
-rem RSpace Interface - installer (Windows). Double-click this file.
-rem Needs no pre-installed Python: it bootstraps `uv` (which provides Python),
-rem provisions dependencies, and creates a launcher. The API key is entered
-rem later in the app's Settings tab.
+rem RSpace Interface - portable setup (Windows).
+rem
+rem Sets up everything INSIDE the application folder, so nothing is written to
+rem %APPDATA% / %USERPROFILE% (which on domain machines get redirected to network
+rem shares and cause trouble). Installs uv into .\.uv\bin, a managed Python into
+rem .\.uv\python, and the dependencies into .\.venv. Run it directly, or let the
+rem "IEECRSpace_Launcher.bat" launcher run it on first start.
 setlocal enableextensions
 chcp 65001 >nul
-title RSpace Interface - Installer
+title RSpace Interface - setup
 
-echo =============================================
-echo   RSpace Interface - Installer
-echo =============================================
-
-rem install.bat lives in Installation\, so the app root is its parent.
 cd /d "%~dp0.."
 set "APP_ROOT=%CD%"
+echo =============================================
+echo   RSpace Interface - setup (self-contained)
+echo =============================================
 echo   App folder: %APP_ROOT%
 
-rem ── Ensure uv is available (per-user, no admin) ──
-where uv >nul 2>&1
-if errorlevel 1 (
-    if exist "%USERPROFILE%\.local\bin\uv.exe" (
-        set "PATH=%USERPROFILE%\.local\bin;%PATH%"
-    ) else (
-        echo   Installing uv ^(this also provides Python^)...
-        powershell -ExecutionPolicy Bypass -NoProfile -Command "irm https://astral.sh/uv/install.ps1 | iex"
-        set "PATH=%USERPROFILE%\.local\bin;%PATH%"
-    )
+rem Keep uv, its managed Python, its cache and the venv all inside the app folder.
+set "UV_INSTALL_DIR=%APP_ROOT%\.uv\bin"
+set "UV_PYTHON_INSTALL_DIR=%APP_ROOT%\.uv\python"
+set "UV_CACHE_DIR=%APP_ROOT%\.uv\cache"
+set "UV_NO_MODIFY_PATH=1"
+set "UV=%UV_INSTALL_DIR%\uv.exe"
+if not exist "%UV_INSTALL_DIR%" mkdir "%UV_INSTALL_DIR%"
+if not exist "%UV_PYTHON_INSTALL_DIR%" mkdir "%UV_PYTHON_INSTALL_DIR%"
+if not exist "%UV_CACHE_DIR%" mkdir "%UV_CACHE_DIR%"
+if not exist "%APP_ROOT%\config" mkdir "%APP_ROOT%\config"
+
+if not exist "%UV%" (
+    echo   Installing uv into the app folder ^(no system changes^)...
+    powershell -ExecutionPolicy Bypass -NoProfile -Command "$env:UV_INSTALL_DIR='%UV_INSTALL_DIR%'; $env:UV_NO_MODIFY_PATH='1'; irm https://astral.sh/uv/install.ps1 | iex"
 )
+if not exist "%UV%" ( echo   ERROR: uv was not installed. & pause & exit /b 1 )
 
-where uv >nul 2>&1
-if errorlevel 1 (
-    echo   ERROR: uv was installed but isn't on PATH yet.
-    echo   Open a new terminal and re-run this installer.
-    pause
-    exit /b 1
-)
-
-echo   Setting up Python and dependencies ^(the first run can take a minute^)...
-uv sync
-if errorlevel 1 ( echo   ERROR: dependency setup failed. & pause & exit /b 1 )
-
-echo   Creating launcher...
-uv run python Installation\finish_setup.py
+echo   Downloading Python and dependencies into the folder (first time only)...
+"%UV%" sync
+if errorlevel 1 ( echo   ERROR: setup failed. & pause & exit /b 1 )
 
 echo.
-echo   Done!  Use the "Launch RSpace.bat" file created in:
+echo   Setup complete. Start the app with "IEECRSpace_Launcher.bat" in:
 echo     %APP_ROOT%
-echo   Then enter your RSpace API key in the app's Settings tab.
-pause
+echo   Then enter your RSpace API key in the Settings tab.

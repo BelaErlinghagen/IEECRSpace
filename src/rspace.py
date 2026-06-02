@@ -21,10 +21,12 @@ Stateless helpers (no network) are module-level functions and can be used direct
 ``generate_filepaths``, ``build_renamed_name`` and ``rename_and_organize_files``.
 
 For applications that want to persist one set of credentials (as the bundled GUI
-does), an optional convenience layer stores them in a per-user config file
-(``load_credentials`` / ``save_credentials``) and offers module-level functions
-(``get_tags``, ``list_all_folders``, ``create_entry`` …) that operate through a
-default client built from those saved credentials.
+does), an optional convenience layer stores them in a config file *inside the
+application folder* (``<project>/config/config.json`` — overridable via the
+``RSPACE_CONFIG_DIR`` environment variable) via ``load_credentials`` /
+``save_credentials``, and offers module-level functions (``get_tags``,
+``list_all_folders``, ``create_entry`` …) that operate through a default client
+built from those saved credentials.
 """
 
 import csv
@@ -34,6 +36,7 @@ import os
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -52,7 +55,7 @@ __all__ = [
     # stored-credentials convenience
     "load_credentials", "save_credentials", "has_credentials", "default_client",
     "check_connection", "test_credentials",
-    "get_tags", "list_all_folders", "get_metadata_in_folder",
+    "get_tags", "list_all_folders", "create_tree", "get_metadata_in_folder",
     "get_dates_for_tag", "get_times_for_tag_and_date", "project_overview",
     "create_entry", "create_entries",
 ]
@@ -67,6 +70,10 @@ METHOD_PREFIX = "m_"
 
 # Entries are named "YYYYMMDD_HHMM_ExtraInfo".
 ENTRY_NAME_RE = re.compile(r"^(\d{8})_(\d{4})_(.+)$")
+
+# Top-level workspace folders create_tree() skips by default — large system/media
+# folders that slow the traversal and aren't useful as entry locations.
+DEFAULT_EXCLUDED_TOP_FOLDERS = ("Gallery", "Examples")
 
 # Column order of the summary CSV produced by create_summary_csv / summarize_documents.
 SUMMARY_FIELDS = ["mouseID", "date", "time", "experimenter_name", "method", "tags", "extra"]
@@ -111,13 +118,22 @@ def _ensure_dir(output_dir):
 
 # ── Local data processing (no network) ────────────────────────────────────────────
 
-def summarize_documents(docs):
+PREPROCESSED_TAG = "preprocessed"
+
+
+def summarize_documents(docs, exclude_no_method=False, include_preprocessed=False):
     """Turn a list of RSpace document dicts into summary rows.
 
     One row per subject ("id_") tag found on a document. The ``mouseID`` and
     ``method`` values have their prefixes stripped (they are used for naming),
     while ``tags`` keeps the raw tag list. Each row is a dict keyed by
     :data:`SUMMARY_FIELDS`.
+
+    Options:
+      - ``exclude_no_method``: skip documents that have no method ("m_") tag
+        (the entries that would otherwise land under "unknown_method").
+      - ``include_preprocessed``: add a ``preprocessed`` column ("yes"/"no")
+        flagging whether the document carries the "preprocessed" tag.
     """
     rows = []
     for doc in docs:
@@ -130,11 +146,13 @@ def summarize_documents(docs):
 
         all_tags = _split_tags(doc.get("tags"))
         method = ";".join(strip_tag_prefix(t) for t in all_tags if t.startswith(METHOD_PREFIX))
+        if exclude_no_method and not method:
+            continue
         tags = ";".join(all_tags)
 
         for tag in all_tags:
             if tag.startswith(ID_PREFIX):
-                rows.append({
+                row = {
                     "mouseID": strip_tag_prefix(tag),
                     "date": date,
                     "time": time,
@@ -142,21 +160,33 @@ def summarize_documents(docs):
                     "method": method,
                     "tags": tags,
                     "extra": extra,
-                })
+                }
+                if include_preprocessed:
+                    row[PREPROCESSED_TAG] = "yes" if PREPROCESSED_TAG in all_tags else "no"
+                rows.append(row)
     return rows
 
 
-def create_summary_csv(metadata_file, output_dir):
+def create_summary_csv(metadata_file, output_dir, exclude_no_method=False,
+                       include_preprocessed=False):
     """Read a metadata JSON file, summarise it (see :func:`summarize_documents`) and
-    write a ``summary_<stem>.csv`` into output_dir. Returns the CSV path."""
+    write a ``summary_<stem>.csv`` into output_dir. Returns the CSV path.
+
+    ``exclude_no_method`` drops entries with no method tag; ``include_preprocessed``
+    adds a "preprocessed" column.
+    """
     meta_path = Path(metadata_file)
     with open(meta_path) as f:
         docs = json.load(f)
-    rows = summarize_documents(docs)
+    rows = summarize_documents(docs, exclude_no_method, include_preprocessed)
+
+    fieldnames = list(SUMMARY_FIELDS)
+    if include_preprocessed:
+        fieldnames.append(PREPROCESSED_TAG)
 
     out = _ensure_dir(output_dir) / f"summary_{meta_path.stem}.csv"
     with open(out, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
     return str(out)
@@ -465,6 +495,88 @@ class RSpaceClient:
             })
         return sorted(result, key=lambda x: x["label"])
 
+    def _tree_records(self, folder_id=None):
+        """Return all records directly inside a folder (or the workspace root), paginated."""
+        path = "folders/tree" if folder_id is None else f"folders/tree/{folder_id}"
+        params = {"pageSize": 100, "pageNumber": 0}
+        records = []
+        while True:
+            data = self._get(path, params)
+            records.extend(data.get("records", []))
+            if len(records) >= data.get("totalHits", 0):
+                break
+            params["pageNumber"] += 1
+        return records
+
+    @staticmethod
+    def _record_to_node(rec):
+        rtype = (rec.get("type") or "").upper()
+        return {
+            "id": rec.get("id"),
+            "name": rec.get("name", ""),
+            "type": rtype.lower(),
+            "notebook": rtype == "NOTEBOOK",
+            "children": [],
+        }
+
+    @classmethod
+    def _sort_tree(cls, nodes):
+        nodes.sort(key=lambda n: (n["type"] not in ("folder", "notebook"), n["name"].lower()))
+        for node in nodes:
+            if node["children"]:
+                cls._sort_tree(node["children"])
+
+    def create_tree(self, folder_id=None, exclude_top=DEFAULT_EXCLUDED_TOP_FOLDERS, max_workers=8):
+        """Return the workspace folder structure as a nested list of nodes.
+
+        Starting at the workspace root (folder_id=None), descends into every folder
+        and notebook so the hierarchy is represented at all depths, and lists every
+        entry. Each node is a dict::
+
+            {"id": int, "name": str,
+             "type": "folder" | "notebook" | "document" | ...,
+             "notebook": bool, "children": [ ...nodes... ]}
+
+        Folders/notebooks carry a (possibly empty) ``children`` list; documents and
+        other items are leaves. Children are sorted folders/notebooks first, then
+        the rest, alphabetically.
+
+        ``exclude_top`` names top-level folders to skip entirely (default: the large
+        system folders ``Gallery`` and ``Examples``, which slow traversal and aren't
+        useful as entry locations). Pass ``()`` to include everything.
+
+        The folders at each depth are fetched concurrently with up to ``max_workers``
+        threads; set ``max_workers=1`` to fetch sequentially.
+        """
+        roots, frontier, visited = [], [], set()
+        for rec in self._tree_records(folder_id):
+            if folder_id is None and rec.get("name", "") in exclude_top:
+                continue
+            node = self._record_to_node(rec)
+            roots.append(node)
+            if node["type"] in ("folder", "notebook") and node["id"] not in visited:
+                visited.add(node["id"])
+                frontier.append(node)
+
+        # Breadth-first: fetch all folders on the current level at once. Worker
+        # threads only issue read-only GETs; the node tree and `visited` set are
+        # only touched on this (main) thread, so no locking is needed.
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+            while frontier:
+                results = pool.map(self._tree_records, [n["id"] for n in frontier])
+                next_frontier = []
+                for parent, records in zip(frontier, results):
+                    for rec in records:
+                        child = self._record_to_node(rec)
+                        parent["children"].append(child)
+                        if child["type"] in ("folder", "notebook") and child["id"] not in visited:
+                            visited.add(child["id"])
+                            next_frontier.append(child)
+                frontier = next_frontier
+
+        self._sort_tree(roots)
+        return roots
+
     # -- reports (fetch + write) --
 
     def fetch_metadata(self, folder_id, output_dir):
@@ -517,48 +629,65 @@ class RSpaceClient:
 
 
 # ── Stored-credentials convenience layer (optional) ─────────────────────────────────
-# Persists a single set of credentials in a per-user config file and exposes
-# module-level functions that operate through a default client built from them.
-# Applications that don't want this can ignore it and use RSpaceClient directly.
+# Persists a single set of credentials and exposes module-level functions that operate
+# through a default client built from them. The config lives *inside the application
+# folder* (``<project>/config/config.json``) so the whole app is self-contained and
+# portable — nothing is written to per-user/system locations (which on Windows domain
+# machines get redirected to network shares and cause trouble). Applications that don't
+# want this can ignore it and use RSpaceClient directly.
 
 def _config_dir():
-    """Return the per-user config directory for stored credentials."""
-    if sys.platform.startswith("win"):
-        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "RSpaceInterface"
+    """Return the config directory: ``$RSPACE_CONFIG_DIR`` if set, else ``<project>/config``.
+
+    This file lives in ``<project>/src``, so the project root is its parent's parent.
+    """
+    override = os.environ.get("RSPACE_CONFIG_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "config"
 
 
 def _config_file():
     return _config_dir() / "config.json"
 
 
-def _find_apikey_file():
-    """Locate a legacy APIkey.txt next to the script or in the cwd, or None."""
-    for candidate in (Path(__file__).parent / "APIkey.txt", Path.cwd() / "APIkey.txt"):
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _read_legacy_apikey():
-    """Read a legacy two-line APIkey.txt (key + URL, any order). Returns (key, url) or None."""
-    legacy = _find_apikey_file()
-    if not legacy:
-        return None
-    lines = [l.strip() for l in legacy.read_text().splitlines() if l.strip()]
-    if not lines:
-        return None
-    if lines[0].startswith("http"):
-        url = lines[0].rstrip("/")
-        key = lines[1] if len(lines) > 1 else ""
+def _legacy_credential_files():
+    """Old locations checked once (for one-time migration into the project config):
+    a per-user OS config dir from earlier versions, and a legacy APIkey.txt."""
+    files = []
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA")
+    elif sys.platform == "darwin":
+        base = str(Path.home() / "Library" / "Application Support")
     else:
-        key = lines[0]
-        url = lines[1].rstrip("/") if len(lines) > 1 else DEFAULT_RSPACE_URL
-    return key, url
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    if base:
+        files.append(("json", Path(base) / "RSpaceInterface" / "config.json"))
+    for txt in (Path(__file__).resolve().parent / "APIkey.txt",
+                Path(__file__).resolve().parent.parent / "APIkey.txt",
+                Path.cwd() / "APIkey.txt"):
+        files.append(("txt", txt))
+    return files
+
+
+def _read_legacy_credentials():
+    """Return (api_key, url) from the first available legacy source, or None."""
+    for kind, path in _legacy_credential_files():
+        if not path.exists():
+            continue
+        try:
+            if kind == "json":
+                data = json.loads(path.read_text())
+                return data.get("api_key", ""), data.get("url") or DEFAULT_RSPACE_URL
+            lines = [l.strip() for l in path.read_text().splitlines() if l.strip()]
+            if not lines:
+                continue
+            if lines[0].startswith("http"):
+                return (lines[1] if len(lines) > 1 else ""), lines[0].rstrip("/")
+            return lines[0], (lines[1].rstrip("/") if len(lines) > 1 else DEFAULT_RSPACE_URL)
+        except Exception:
+            continue
+    return None
 
 
 _credentials = None      # cached (api_key, url)
@@ -566,8 +695,8 @@ _default_client = None    # cached RSpaceClient built from the saved credentials
 
 
 def load_credentials():
-    """Return the saved (api_key, url), loading from config.json (or migrating a legacy
-    APIkey.txt) on first use. Cached in module state."""
+    """Return the saved (api_key, url), loading from the project config (or migrating from
+    a legacy location) on first use. Cached in module state."""
     global _credentials
     if _credentials is not None:
         return _credentials
@@ -581,9 +710,9 @@ def load_credentials():
         except Exception:
             pass  # fall through to migration / defaults
 
-    migrated = _read_legacy_apikey()
-    if migrated:
-        save_credentials(migrated[0], migrated[1])  # persist to the new location
+    migrated = _read_legacy_credentials()
+    if migrated and migrated[0]:
+        save_credentials(migrated[0], migrated[1])  # persist into the project config
         return _credentials
 
     _credentials = ("", DEFAULT_RSPACE_URL)
@@ -632,6 +761,10 @@ def get_tags(project_folder=None):
 
 def list_all_folders():
     return default_client().list_folders()
+
+
+def create_tree():
+    return default_client().create_tree()
 
 
 def get_metadata_in_folder(folder_id, output_dir):

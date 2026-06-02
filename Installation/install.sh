@@ -1,79 +1,53 @@
 #!/usr/bin/env bash
 #
-# RSpace Interface — installer (macOS / Linux)
+# RSpace Interface — portable setup (macOS / Linux).
 #
-# Works two ways:
-#   • From the unzipped project folder:   bash Installation/install.sh
-#   • As a one-liner once on GitHub:      curl -LsSf <raw-url>/Installation/install.sh | bash
-#
-# It needs NO pre-installed Python: it bootstraps `uv` (a single self-contained
-# tool that also downloads its own Python), then provisions the dependencies and
-# creates a double-click launcher. The API key is entered later in the app's
-# Settings tab — this script never asks for it.
+# Sets up everything INSIDE the application folder, so nothing is written to
+# per-user/system locations (which on managed/domain machines get redirected to
+# network shares and cause trouble). It installs `uv` into ./.uv/bin, a managed
+# Python into ./.uv/python, and the dependencies into ./.venv. Run it directly, or
+# just let the "IEECRSpace_Launcher" launcher run it on first start.
 
 set -eu
 
-REPO_URL="https://github.com/BelaErlinghagen/rspace-interface"  
-UV_BIN_DIR="$HOME/.local/bin"
-
-echo "============================================="
-echo "  RSpace Interface — Installer"
-echo "============================================="
-
-# ── 1. Find the project folder ──────────────────────────────────────────────────
-# install.sh lives in Installation/, so the app root is its parent. When piped
-# from curl there is no script file on disk, so we download the project instead.
-SCRIPT_DIR=""
+# Locate the application root (the parent of this Installation/ folder).
 if [ -f "$0" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-fi
-
-APP_ROOT=""
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../rspace_interface.py" ]; then
-    APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-elif [ -f "./rspace_interface.py" ]; then
+    APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+elif [ -f "./src/rspace_interface.py" ]; then
     APP_ROOT="$(pwd)"
-fi
-
-if [ -z "$APP_ROOT" ]; then
-    echo "  App files not found locally — downloading from GitHub…"
-    if ! command -v git >/dev/null 2>&1; then
-        echo "  ERROR: git is required to download the project. Install git and retry." >&2
-        exit 1
-    fi
-    APP_ROOT="${RSPACE_INSTALL_DIR:-$HOME/RSpaceInterface}"
-    git clone --depth 1 "$REPO_URL" "$APP_ROOT"
-fi
-echo "  App folder: $APP_ROOT"
-
-# ── 2. Ensure uv is available (per-user, no admin) ───────────────────────────────
-ensure_uv() {
-    if command -v uv >/dev/null 2>&1; then return; fi
-    if [ -x "$UV_BIN_DIR/uv" ]; then
-        export PATH="$UV_BIN_DIR:$PATH"
-        return
-    fi
-    echo "  Installing uv (this also provides Python — nothing else to install)…"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$UV_BIN_DIR:$PATH"
-}
-ensure_uv
-
-if ! command -v uv >/dev/null 2>&1; then
-    echo "  ERROR: uv was installed but isn't on PATH yet." >&2
-    echo "  Open a new terminal (or add $UV_BIN_DIR to your PATH) and re-run." >&2
+else
+    echo "ERROR: run this from inside the unzipped RSpace Interface folder." >&2
     exit 1
 fi
 
-# ── 3. Provision Python + dependencies ──────────────────────────────────────────
-echo "  Setting up Python and dependencies (the first run can take a minute)…"
-( cd "$APP_ROOT" && uv sync )
+echo "============================================="
+echo "  RSpace Interface — setup (self-contained)"
+echo "============================================="
+echo "  App folder: $APP_ROOT"
 
-# ── 4. Create the double-click launcher ──────────────────────────────────────────
-echo "  Creating launcher…"
-( cd "$APP_ROOT" && uv run python Installation/finish_setup.py )
+# Keep uv, its managed Python, its cache and the venv all inside the app folder.
+export UV_INSTALL_DIR="$APP_ROOT/.uv/bin"
+export UV_PYTHON_INSTALL_DIR="$APP_ROOT/.uv/python"
+export UV_CACHE_DIR="$APP_ROOT/.uv/cache"
+export UV_NO_MODIFY_PATH=1          # do not touch the user's shell profile/PATH
+UV="$UV_INSTALL_DIR/uv"
+mkdir -p "$UV_INSTALL_DIR" "$UV_PYTHON_INSTALL_DIR" "$UV_CACHE_DIR" "$APP_ROOT/config"
+
+# 1. Install uv into the app folder if it isn't there yet.
+if [ ! -x "$UV" ]; then
+    echo "  Installing uv into the app folder (no system changes)…"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+if [ ! -x "$UV" ]; then
+    echo "  ERROR: uv was not installed at $UV" >&2
+    exit 1
+fi
+
+# 2. Provision the pinned Python + dependencies into ./.venv.
+echo "  Downloading Python and dependencies into the folder (first time only)…"
+( cd "$APP_ROOT" && "$UV" sync )
 
 echo ""
-echo "  ✓ Done!  Open the launcher created in:"
+echo "  ✓ Setup complete. Start the app with the 'IEECRSpace_Launcher' file in:"
 echo "      $APP_ROOT"
-echo "  Then enter your RSpace API key in the app's Settings tab."
+echo "  Then enter your RSpace API key in the Settings tab."

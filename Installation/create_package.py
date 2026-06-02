@@ -3,9 +3,10 @@
 Create a distributable zip of the RSpace Interface.
 Run this from anywhere; the zip is saved next to this script.
 
-The zip contains only the source files needed by a new user —
-it deliberately excludes .venv/, the user config (APIkey.txt / config.json),
-__pycache__, and any generated launchers (the installer recreates those).
+The zip is a self-contained app folder (ImageJ-style): the launchers, the source
+in src/, and the installer. It deliberately excludes the in-folder runtime that the
+installer builds (.uv/, .venv/) and the user's config/ (which holds the API key),
+plus caches/__pycache__.
 """
 
 import zipfile
@@ -15,17 +16,19 @@ from datetime import datetime
 INSTALL_DIR = Path(__file__).resolve().parent   # Installation/
 APP_DIR = INSTALL_DIR.parent                    # project root
 
-# Files and folders to include (relative to APP_DIR)
+# Files to include (relative to APP_DIR). The app folder the user receives.
 INCLUDE = [
-    "rspace.py",
-    "rspace_interface.py",
-    "IEECRlogo.png",
+    "src/rspace.py",
+    "src/rspace_interface.py",
+    "src/IEECRlogo.png",
     "pyproject.toml",
     "uv.lock",
+    ".python-version",
+    "IEECRSpace_Launcher.command",
+    "IEECRSpace_Launcher.bat",
+    "IEECRSpace_Launcher.sh",
     "Installation/install.sh",
-    "Installation/install.command",
     "Installation/install.bat",
-    "Installation/finish_setup.py",
     "Installation/create_package.py",
 ]
 
@@ -58,14 +61,14 @@ def main():
     print(f"Saved to: {zip_path}")
     print()
     print("Hand this zip to other users. They should:")
-    print("  1. Unzip it anywhere (e.g. their Desktop)")
-    print("  2. Open the  Installation/  folder")
-    print("  3. Run the installer for their OS (no Python needed):")
-    print("       Windows : double-click install.bat")
-    print("       macOS   : double-click install.command")
-    print("       Linux   : run  bash install.sh")
-    print("  4. Open the launcher it creates, then enter the API key")
-    print("     in the app's Settings tab.")
+    print("  1. Unzip it anywhere (keep the whole folder together)")
+    print("  2. Double-click the launcher for their OS — it self-installs on first run:")
+    print("       Windows : 'IEECRSpace_Launcher.bat'")
+    print("       macOS   : 'IEECRSpace_Launcher.command'")
+    print("       Linux   : run  bash IEECRSpace_Launcher.sh")
+    print("  3. Enter the RSpace API key in the app's Settings tab.")
+    print()
+    print("Everything (Python, dependencies, config) stays inside that one folder.")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,15 @@
+# In-folder runtime built by the installer (uv binary, managed Python, cache, venv)
+.uv/
+.venv/
+
+# User configuration — contains the RSpace API key. NEVER commit.
+config/
+APIkey.txt
+
+# Build artifacts
+Installation/*.zip
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
