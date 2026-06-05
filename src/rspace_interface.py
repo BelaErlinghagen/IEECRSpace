@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QStatusBar,
     QListWidget, QListWidgetItem, QGroupBox, QCheckBox,
     QMessageBox, QCompleter, QScrollArea, QSpinBox,
-    QTreeWidget, QTreeWidgetItem,
+    QTreeWidget, QTreeWidgetItem, QRadioButton, QButtonGroup,
 )
 
 import rspace
@@ -564,8 +564,10 @@ class RSpaceGUI(QMainWindow):
         self._tab_header(layout, "Generate File Paths",
             "Reads the summary CSV and generates a suggested folder path for each entry, "
             "saving them as a CSV in the chosen output folder. Raw entries go to "
-            "method/experimenter/filename; entries tagged 'preprocessed' or 'results' go to "
-            "processed_data/ag_beck/experimenter/<preprocessed|results>/filename.")
+            "raw_data/method/experimenter/filename; entries tagged 'preprocessed' or "
+            "'results' go to processed_data/<lab>/experimenter/<preprocessed|results>/filename. "
+            "Choose the output format and whether to include the raw_data/ and "
+            "processed_data/ top-level folders — the Example below updates to match.")
         form = self._make_form()
         self._fp_csv_path = QLineEdit()
         self._fp_csv_path.setPlaceholderText("summary_metadata_12345.csv")
@@ -578,6 +580,57 @@ class RSpaceGUI(QMainWindow):
         self._fp_output, out_row = self._output_folder_row()
         form.addRow("Save to:", out_row)
         layout.addLayout(form)
+
+        # Output format: one full-path column (current) or split into three columns.
+        fmt_box = QGroupBox("Output format")
+        fmt_layout = QVBoxLayout(fmt_box)
+        fmt_layout.setSpacing(4)
+        self._fp_fmt_group = QButtonGroup(self)
+        self._fp_fmt_full = QRadioButton(
+            "One path per entry  —  columns:  mouseID, filepath")
+        self._fp_fmt_split = QRadioButton(
+            "Split  —  columns:  id, entry name, path  (path excludes the entry name)")
+        self._fp_fmt_full.setChecked(True)   # default: current behaviour
+        self._fp_fmt_group.addButton(self._fp_fmt_full)
+        self._fp_fmt_group.addButton(self._fp_fmt_split)
+        fmt_layout.addWidget(self._fp_fmt_full)
+        fmt_layout.addWidget(self._fp_fmt_split)
+        layout.addWidget(fmt_box)
+
+        # Optional top-level folders. Off = the path starts one level lower, so users
+        # whose top-level folder is named differently can add their own.
+        top_box = QGroupBox("Top-level folders (optional)")
+        top_layout = QVBoxLayout(top_box)
+        top_layout.setSpacing(4)
+        top_layout.addWidget(QLabel(
+            "Prepend a standard top-level folder. Turn one off if your computer uses a "
+            "different top-level name — everything below it stays the same."))
+        self._fp_rawdata_chk = QCheckBox("Prefix raw-data paths with 'raw_data/'")
+        self._fp_rawdata_chk.setChecked(True)
+        self._fp_processed_chk = QCheckBox(
+            "Prefix preprocessed/results paths with 'processed_data/'")
+        self._fp_processed_chk.setChecked(True)
+        top_layout.addWidget(self._fp_rawdata_chk)
+        top_layout.addWidget(self._fp_processed_chk)
+        layout.addWidget(top_box)
+
+        # Live example of what the chosen options produce (uses the real backend so it
+        # always matches the generated CSV).
+        ex_box = QGroupBox("Example")
+        ex_layout = QVBoxLayout(ex_box)
+        self._fp_example = QLabel()
+        self._fp_example.setWordWrap(True)
+        self._fp_example.setStyleSheet("font-family: monospace;")
+        self._fp_example.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        ex_layout.addWidget(self._fp_example)
+        layout.addWidget(ex_box)
+
+        for widget in (self._fp_fmt_full, self._fp_fmt_split,
+                       self._fp_rawdata_chk, self._fp_processed_chk):
+            widget.toggled.connect(self._update_fp_example)
+        self._update_fp_example()
+
         btn = QPushButton("Generate File Paths")
         btn.clicked.connect(self._run_generate_filepaths)
         layout.addWidget(btn)
@@ -594,6 +647,37 @@ class RSpaceGUI(QMainWindow):
         if path:
             self._fp_csv_path.setText(path)
 
+    def _fp_options(self):
+        """Return the (fmt, raw_data_prefix, processed_data_prefix) chosen in the tab."""
+        return (
+            "split" if self._fp_fmt_split.isChecked() else "full",
+            self._fp_rawdata_chk.isChecked(),
+            self._fp_processed_chk.isChecked(),
+        )
+
+    def _update_fp_example(self, *_):
+        """Refresh the live example to match the selected format and prefixes."""
+        fmt, raw_prefix, processed_prefix = self._fp_options()
+        # Two representative entries: a raw recording and a preprocessed result.
+        sample = [
+            {"mouseID": "OPI111", "date": "20260601", "time": "1030",
+             "experimenter_name": "ada_lovelace", "method": "microscopy",
+             "tags": "id_OPI111;m_microscopy", "extra": "test"},
+            {"mouseID": "OPI112", "date": "20260601", "time": "1045",
+             "experimenter_name": "ada_lovelace", "method": "",
+             "tags": "preprocessed", "extra": "analysis"},
+        ]
+        records = rspace.filepaths_for_rows(
+            sample, rspace.load_lab_group(), fmt=fmt,
+            raw_data_prefix=raw_prefix, processed_data_prefix=processed_prefix)
+        if fmt == "split":
+            lines = ["id  |  entry name  |  path"]
+            lines += [f"{r[0] or '(none)'}  |  {r[1]}  |  {r[2]}" for r in records]
+        else:
+            lines = ["mouseID  |  filepath"]
+            lines += [f"{r[0] or '(none)'}  |  {r[1]}" for r in records]
+        self._fp_example.setText("\n".join(lines))
+
     def _run_generate_filepaths(self):
         path = self._fp_csv_path.text().strip()
         if not path:
@@ -603,8 +687,10 @@ class RSpaceGUI(QMainWindow):
         if not output_dir:
             self._print("Please choose an output folder ('Save to').")
             return
+        fmt, raw_prefix, processed_prefix = self._fp_options()
         self._set_status("Generating file paths…")
-        self._run(rspace.generate_filepaths, self._show_filepaths_result, path, output_dir)
+        self._run(rspace.generate_filepaths, self._show_filepaths_result, path, output_dir,
+                  fmt=fmt, raw_data_prefix=raw_prefix, processed_data_prefix=processed_prefix)
 
     def _show_filepaths_result(self, path):
         self._fp_last_path = path

@@ -340,9 +340,28 @@ def example_local_csv_pipeline(output_dir):
     only_preprocessed = rspace.summarize_documents(docs, filter_tags=["preprocessed"])
     print("filtered to 'preprocessed':", len(only_preprocessed), "row(s)")
 
-    # filepaths_for_rows: organised paths derived from the rows above.
-    print("filepaths_for_rows:")
+    # filepaths_for_rows builds organised paths from those rows. It has two
+    # outputs and two optional top-level folders:
+    #
+    #   fmt="full"  → (mouseID, filepath)        full path incl. the entry name
+    #   fmt="split" → (id, entry name, path)     path WITHOUT the entry name
+    #
+    #   raw_data_prefix=True       → raw paths start with       "raw_data/"
+    #   processed_data_prefix=True → processed paths start with "processed_data/"
+    #
+    print("filepaths_for_rows, fmt='full' (default), prefixes on:")
     for mouse_id, path in rspace.filepaths_for_rows(rows, lab_group="ag_beck"):
+        print(f"    {mouse_id or '(none)'} → {path}")
+
+    print("filepaths_for_rows, fmt='split':")
+    for subject_id, entry_name, path in rspace.filepaths_for_rows(
+            rows, lab_group="ag_beck", fmt="split"):
+        print(f"    id={subject_id or '(none)'!r:12} name={entry_name!r:12} → {path}")
+
+    print("filepaths_for_rows, prefixes OFF (no raw_data/ or processed_data/):")
+    for mouse_id, path in rspace.filepaths_for_rows(
+            rows, lab_group="ag_beck",
+            raw_data_prefix=False, processed_data_prefix=False):
         print(f"    {mouse_id or '(none)'} → {path}")
 
     # The file-based variants: write a metadata JSON, then drive the CSV tools.
@@ -355,8 +374,15 @@ def example_local_csv_pipeline(output_dir):
     summary_csv = rspace.create_summary_csv(meta_file, output_dir)
     print("create_summary_csv →", summary_csv)
 
-    filepaths_csv = rspace.generate_filepaths(summary_csv, output_dir, lab_group="ag_beck")
-    print("generate_filepaths →", filepaths_csv)
+    # generate_filepaths writes one CSV; the columns follow fmt:
+    #   "full"  → mouseID, filepath        "split" → id, entry name, path
+    full_csv = rspace.generate_filepaths(summary_csv, output_dir, lab_group="ag_beck")
+    print("generate_filepaths (full)  →", full_csv)
+
+    split_dir = Path(output_dir) / "split"  # separate dir: same input stem ⇒ same name
+    split_csv = rspace.generate_filepaths(summary_csv, split_dir, lab_group="ag_beck",
+                                          fmt="split")
+    print("generate_filepaths (split) →", split_csv)
 
 
 def example_renaming(output_dir):

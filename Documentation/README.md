@@ -719,7 +719,7 @@ Read a metadata JSON file, summarise it, and write `summary_<stem>.csv`.
 **filter_tags** : optional (see [`summarize_documents`](#summarize_documentsdocs-filter_tagsnone)).
 **Returns** — `str`: the written CSV path.
 
-### `filepaths_for_rows(rows, lab_group=LAB_GROUP)`
+### `filepaths_for_rows(rows, lab_group=LAB_GROUP, *, fmt="full", raw_data_prefix=True, processed_data_prefix=True)`
 
 Build organised file paths from summary rows.
 
@@ -731,28 +731,81 @@ Build organised file paths from summary rows.
 - **lab_group** : `str`, optional
   Lab group used in `processed_data/…` paths (default
   [`LAB_GROUP`](#module-constants), `"ag_beck"`).
+- **fmt** : `{"full", "split"}`, keyword-only, optional
+  The shape of the returned rows (default `"full"`).
+- **raw_data_prefix** : `bool`, keyword-only, optional
+  If `True` (default), raw-data paths are prefixed with `raw_data/`.
+- **processed_data_prefix** : `bool`, keyword-only, optional
+  If `True` (default), preprocessed/results paths are prefixed with
+  `processed_data/`.
 
 **Returns**
 
 - `list` of `tuple`
-  `(mouseID, filepath)` pairs. The filename is `mouseID_date_time_extra` (empty
-  parts omitted). The directory depends on tags:
-  - `preprocessed` → `processed_data/<lab>/<experimenter>/preprocessed/…`
-  - `results` → `processed_data/<lab>/<experimenter>/results/…`
+  - With `fmt="full"` → `(mouseID, filepath)` **pairs**, where `filepath` is the
+    whole path ending in `mouseID_date_time_extra` (empty parts omitted).
+  - With `fmt="split"` → `(id, entry_name, path)` **triples**, where `entry_name`
+    is the `extra` part of the name and `path` is the whole path *without* it
+    (ending in `mouseID_date_time`).
+
+  The directory of each entry depends on its tags:
+  - `preprocessed` → `<lab>/<experimenter>/preprocessed/…`
+  - `results` → `<lab>/<experimenter>/results/…`
   - otherwise (raw) → `<method>/<experimenter>/…` (method falls back to
     `unknown_method`).
 
   An entry tagged both `preprocessed` and `results` yields one path for each.
 
-### `generate_filepaths(summary_csv, output_dir, lab_group=None)`
+**Notes**
 
-Read a summary CSV, build organised paths, and write
-`filepaths_<stem>.csv` (columns: `mouseID`, `filepath`).
+The two **top-level folders** (`raw_data` and `processed_data`) are optional so
+that users whose local top-level folder is named differently can leave them off
+and add their own — everything *below* the top level is identical either way.
 
-**Parameters** — **summary_csv** : path-like; **output_dir** : path-like;
-**lab_group** : `str`, optional (defaults to the saved
-[`load_lab_group()`](#load_lab_group) setting).
+**Examples**
+
+```python
+rows = [{"mouseID": "OPI111", "date": "20260601", "time": "1030",
+         "experimenter_name": "ada_lovelace", "method": "microscopy",
+         "tags": "id_OPI111;m_microscopy", "extra": "test"}]
+
+>>> filepaths_for_rows(rows)                       # fmt="full", prefixes on
+[('OPI111', 'raw_data/microscopy/ada_lovelace/OPI111_20260601_1030_test')]
+
+>>> filepaths_for_rows(rows, fmt="split")          # three-part rows
+[('OPI111', 'test', 'raw_data/microscopy/ada_lovelace/OPI111_20260601_1030')]
+
+>>> filepaths_for_rows(rows, raw_data_prefix=False)
+[('OPI111', 'microscopy/ada_lovelace/OPI111_20260601_1030_test')]
+```
+
+### `generate_filepaths(summary_csv, output_dir, lab_group=None, *, fmt="full", raw_data_prefix=True, processed_data_prefix=True)`
+
+Read a summary CSV, build organised paths, and write `filepaths_<stem>.csv`.
+
+**Parameters**
+
+- **summary_csv** : path-like — the summary CSV to read.
+- **output_dir** : path-like — destination directory (created if missing).
+- **lab_group** : `str`, optional — defaults to the saved
+  [`load_lab_group()`](#load_lab_group) setting.
+- **fmt** : `{"full", "split"}`, keyword-only, optional — selects the columns
+  written:
+  - `"full"` (default) → `mouseID, filepath`
+  - `"split"` → `id, entry name, path` (the path excludes the trailing entry name)
+- **raw_data_prefix**, **processed_data_prefix** : `bool`, keyword-only, optional
+  — toggle the `raw_data/` and `processed_data/` top-level folders (both on by
+  default). See [`filepaths_for_rows`](#filepaths_for_rowsrows-lab_grouplab_group--fmtfull-raw_data_prefixtrue-processed_data_prefixtrue).
+
 **Returns** — `str`: the written CSV path.
+
+**Examples**
+
+```python
+# Three-column CSV without the top-level folders:
+generate_filepaths("summary_metadata_12345.csv", "~/Desktop",
+                   fmt="split", raw_data_prefix=False, processed_data_prefix=False)
+```
 
 ### `build_renamed_name(original_name, prefix, strip_front=0, strip_back=0)`
 
@@ -898,6 +951,8 @@ rspace.create_entry(12345, ["id_OPI111"], "20260601_1200_test", "Notes")
 | `LAB_GROUP` | `"ag_beck"` | Default lab group in `processed_data/…` paths. |
 | `PREPROCESSED_TAG` | `"preprocessed"` | Data-state tag routed to `processed_data/…/preprocessed`. |
 | `RESULTS_TAG` | `"results"` | Data-state tag routed to `processed_data/…/results`. |
+| `RAW_DATA_TOP` | `"raw_data"` | Optional top-level folder for raw-data paths (`raw_data_prefix`). |
+| `PROCESSED_DATA_TOP` | `"processed_data"` | Optional top-level folder for preprocessed/results paths (`processed_data_prefix`). |
 
 The public API is also enumerated in the module's `__all__`.
 

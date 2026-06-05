@@ -126,6 +126,13 @@ RESULTS_TAG = "results"
 # Where processed/result data files are organised (see filepaths_for_rows).
 LAB_GROUP = "ag_beck"
 
+# Optional top-level folders prepended to generated paths (see filepaths_for_rows):
+# raw-data paths can start with "raw_data/" and preprocessed/results paths with
+# "processed_data/". Both are on by default; they can be turned off for users whose
+# local top-level folder is named differently (everything below them stays fixed).
+RAW_DATA_TOP = "raw_data"
+PROCESSED_DATA_TOP = "processed_data"
+
 
 def filterable_tags(metadata_file):
     """Return the sorted tags in a metadata file that make sense as summary filters:
@@ -209,58 +216,96 @@ def create_summary_csv(metadata_file, output_dir, filter_tags=None):
     return str(out)
 
 
-def filepaths_for_rows(rows, lab_group=LAB_GROUP):
+def filepaths_for_rows(rows, lab_group=LAB_GROUP, *, fmt="full",
+                       raw_data_prefix=True, processed_data_prefix=True):
     """Build organised file paths from summary rows (dicts shaped like
     :func:`summarize_documents` output).
 
-    Returns a list of (mouseID, filepath) pairs. The filename is
-    ``mouseID_date_time_extra`` (omitting empty parts — e.g. an ID-less results entry
-    just uses its date_time_extra / name); its directory depends on the entry's tags:
+    The **directory** of each entry depends on its tags:
 
-      - tagged ``preprocessed`` → ``processed_data/<lab>/<experimenter>/preprocessed/…``
-      - tagged ``results``      → ``processed_data/<lab>/<experimenter>/results/…``
+      - tagged ``preprocessed`` → ``<lab>/<experimenter>/preprocessed/…``
+      - tagged ``results``      → ``<lab>/<experimenter>/results/…``
       - otherwise (raw data)    → ``<method>/<experimenter>/…`` (method falls back to
         "unknown_method").
 
     An entry carrying both ``preprocessed`` and ``results`` yields one path for each.
+
+    Two optional **top-level folders** are prepended in front of those directories
+    (both on by default — turn one off if your local top-level folder is named
+    differently and you want to add it yourself; everything below it stays fixed):
+
+      - ``raw_data_prefix`` → raw-data paths become ``raw_data/<method>/…``
+      - ``processed_data_prefix`` → preprocessed/results paths become
+        ``processed_data/<lab>/…``
+
+    ``fmt`` chooses the shape of the returned rows:
+
+      - ``"full"`` (default) → ``(mouseID, filepath)`` pairs, where ``filepath`` is the
+        whole path ending in ``mouseID_date_time_extra`` (empty parts omitted — e.g. an
+        ID-less results entry just uses its ``date_time_extra`` / name).
+      - ``"split"`` → ``(id, entry_name, path)`` triples, where ``entry_name`` is the
+        "extra" part of the name and ``path`` is the whole path *without* it (ending in
+        ``mouseID_date_time``). For ``20260601_1030_test`` the entry name is ``test`` and
+        the path ends in ``…/OPI111_20260601_1030``.
     """
-    pairs = []
+    out = []
     for row in rows:
         experimenter = row.get("experimenter_name", "")
         mouse_id = row.get("mouseID", "")
+        extra = row.get("extra", "")
         tags = [t for t in (row.get("tags") or "").split(";") if t]
-        parts = [p for p in (mouse_id, row.get("date", ""), row.get("time", ""),
-                             row.get("extra", "")) if p]
-        filename = "_".join(parts)
+
+        # Name without the trailing "extra" part, and with it.
+        stem = "_".join(p for p in (mouse_id, row.get("date", ""), row.get("time", "")) if p)
+        full = "_".join(p for p in (stem, extra) if p)
 
         dirs = []
         if PREPROCESSED_TAG in tags:
-            dirs.append(f"processed_data/{lab_group}/{experimenter}/{PREPROCESSED_TAG}")
+            base = f"{lab_group}/{experimenter}/{PREPROCESSED_TAG}"
+            dirs.append(f"{PROCESSED_DATA_TOP}/{base}" if processed_data_prefix else base)
         if RESULTS_TAG in tags:
-            dirs.append(f"processed_data/{lab_group}/{experimenter}/{RESULTS_TAG}")
+            base = f"{lab_group}/{experimenter}/{RESULTS_TAG}"
+            dirs.append(f"{PROCESSED_DATA_TOP}/{base}" if processed_data_prefix else base)
         if not dirs:  # raw data → grouped by method
             method = next((m for m in (row.get("method") or "").split(";") if m), "unknown_method")
-            dirs.append(f"{method}/{experimenter}")
+            base = f"{method}/{experimenter}"
+            dirs.append(f"{RAW_DATA_TOP}/{base}" if raw_data_prefix else base)
 
         for d in dirs:
-            pairs.append((mouse_id, f"{d}/{filename}"))
-    return pairs
+            if fmt == "split":
+                out.append((mouse_id, extra, f"{d}/{stem}" if stem else d))
+            else:
+                out.append((mouse_id, f"{d}/{full}" if full else d))
+    return out
 
 
-def generate_filepaths(summary_csv, output_dir, lab_group=None):
+def generate_filepaths(summary_csv, output_dir, lab_group=None, *, fmt="full",
+                       raw_data_prefix=True, processed_data_prefix=True):
     """Read a summary CSV, build organised file paths (see :func:`filepaths_for_rows`)
-    and write them to ``filepaths_<stem>.csv`` (columns: mouseID, filepath) in
-    output_dir. Returns the written CSV path. ``lab_group`` defaults to the saved
-    setting (``load_lab_group()``)."""
+    and write them to ``filepaths_<stem>.csv`` in output_dir. Returns the written CSV
+    path. ``lab_group`` defaults to the saved setting (``load_lab_group()``).
+
+    ``fmt`` selects the columns written (see :func:`filepaths_for_rows`):
+
+      - ``"full"`` (default) → columns ``mouseID, filepath``.
+      - ``"split"`` → columns ``id, entry name, path`` (the path excludes the trailing
+        entry name).
+
+    ``raw_data_prefix`` / ``processed_data_prefix`` toggle the ``raw_data/`` and
+    ``processed_data/`` top-level folders (both on by default).
+    """
     with open(summary_csv, newline="") as f:
         rows = list(csv.DictReader(f))
-    pairs = filepaths_for_rows(rows, lab_group or load_lab_group())
+    records = filepaths_for_rows(rows, lab_group or load_lab_group(), fmt=fmt,
+                                 raw_data_prefix=raw_data_prefix,
+                                 processed_data_prefix=processed_data_prefix)
 
+    header = ["id", "entry name", "path"] if fmt == "split" else ["mouseID", "filepath"]
     out = _ensure_dir(output_dir) / f"filepaths_{Path(summary_csv).stem}.csv"
     with open(out, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["mouseID", "filepath"])
-        writer.writerows(pairs)
+        writer.writerow(header)
+        writer.writerows(records)
     return str(out)
 
 

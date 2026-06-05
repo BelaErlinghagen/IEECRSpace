@@ -48,9 +48,9 @@ The interface is organised into tabs:
 | **Rename Files** | Rename local data files with a structured `ID_date_time` prefix (the ID is looked up from RSpace tags, prefix stripped). Optionally erase characters from the original name, move the files into a new folder, and/or copy them to a raw-data location. |
 | **Fetch Metadata** | Download the metadata of all documents in a folder as a JSON file (the starting point for the CSV tools). |
 | **Summary CSV** | Turn fetched metadata into a spreadsheet — one row per subject. Optionally **filter** entries by tag: add `preprocessed`, `results`, or any method found in the file, and only entries carrying **any** of the selected tags are kept. |
-| **File Paths** | Generate a suggested, organised file path for each entry and save them as a CSV. Raw entries go to `method/experimenter/filename`; entries tagged `preprocessed` or `results` go to `processed_data/<lab group>/<experimenter>/<preprocessed\|results>/filename`. |
+| **File Paths** | Generate a suggested, organised file path for each entry and save them as a CSV. Raw entries go to `raw_data/method/experimenter/filename`; entries tagged `preprocessed` or `results` go to `processed_data/<lab group>/<experimenter>/<preprocessed\|results>/filename`. **Choose the output format** — *full path* (columns `mouseID, filepath`) or *split* (columns `id, entry name, path`, where the path stops before the entry name). Two checkboxes toggle the **top-level folders** `raw_data/` and `processed_data/` (both on by default) for users whose top-level folder is named differently. A live **Example** shows exactly what the current choices produce. |
 | **Project Overview** | Build a spreadsheet of a whole folder: one row per document, one column per form field (header = field name, cell = value). Works for shared folders too. |
-| **Results Entry** | Log a folder of analysis results: browse to the local **results folder** (its name becomes the entry name), pick the RSpace destination, and add a **comment** describing how the results were obtained. The entry is tagged `results`, so the File Paths tab reproduces its location as `processed_data/<lab group>/<your name>/results/<folder name>`. |
+| **Results Entry** | Log a folder of analysis results: browse to the local **results folder** (its name becomes the entry name), pick the RSpace destination, and add a **comment** describing how the results were obtained. The entry is tagged `results`, so the File Paths tab reproduces its location as `processed_data/<lab group>/<your name>/results/<folder name>` (by default; the `processed_data/` prefix can be turned off there). |
 | **Settings** | Store and test your API key and server URL, and set the **lab group** used in processed-data paths (default `ag_beck`). |
 
 The folder pickers show the **entire workspace folder tree** (folders and notebooks, at all
@@ -93,9 +93,12 @@ client.project_overview(folder_id=12345, output_dir="~/Desktop")
 
 Stateless helpers (`strip_tag_prefix`, `summarize_documents`, `create_summary_csv`,
 `filterable_tags`, `generate_filepaths`, `build_renamed_name`, …) are available as plain
-functions. See the module docstring and `__all__` for the full public API. Credentials and
-the lab group can be supplied explicitly (as above) or, for the bundled app, stored in
-`config/config.json` via `save_credentials()`/`load_credentials()` and
+functions. `generate_filepaths` / `filepaths_for_rows` take `fmt="full"|"split"` and
+`raw_data_prefix` / `processed_data_prefix` toggles for the top-level folders. See the
+module docstring and `__all__` for the full public API, and
+[`Documentation/`](Documentation/) for a reference manual and runnable examples.
+Credentials and the lab group can be supplied explicitly (as above) or, for the bundled
+app, stored in `config/config.json` via `save_credentials()`/`load_credentials()` and
 `save_lab_group()`/`load_lab_group()`.
 
 ---
